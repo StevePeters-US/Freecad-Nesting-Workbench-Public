@@ -10,11 +10,17 @@ class MockVector:
     def copy(self):
         return MockVector(self.x, self.y, self.z)
 
+    def __add__(self, other):
+        return MockVector(self.x + other.x, self.y + other.y, self.z + other.z)
+
+    def __sub__(self, other):
+        return MockVector(self.x - other.x, self.y - other.y, self.z - other.z)
+
     def __eq__(self, other):
-        return abs(self.x - other.x) < 1e-6 and abs(self.y - other.y) < 1e-6 and abs(self.z - other.z) < 1e-6
+        return abs(self.x - other.x) < 1e-5 and abs(self.y - other.y) < 1e-5 and abs(self.z - other.z) < 1e-5
 
     def __repr__(self):
-        return f"MockVector({self.x}, {self.y}, {self.z})"
+        return f"MockVector({round(self.x, 6)}, {round(self.y, 6)}, {round(self.z, 6)})"
 
 class MockBoundBox:
     def __init__(self, xmin, xmax, ymin, ymax):
@@ -91,8 +97,8 @@ def test_separate_overlapping_simple(resolver):
     # p2 was at (80, 50), center (130, 100)
     # p1 center (50, 50)
     # p2.center_x > p1.center_x -> push in +X direction
-    # expected p2.x = 80 + 20 = 100
-    assert p2.Placement.Base == MockVector(100, 50, 0)
+    # expected p2.x = 80 + 20 + 0.001 = 100.001
+    assert p2.Placement.Base == MockVector(100.001, 50, 0)
 
 def test_separate_overlapping_multiple(resolver):
     # p1 at (0,0), size 100x100
@@ -108,4 +114,23 @@ def test_separate_overlapping_multiple(resolver):
     
     resolved = resolver.separate_overlapping(p_moved, [p1, p2])
     assert resolved
-    assert p_moved.Placement.Base == MockVector(100, 0, 0)
+    assert p_moved.Placement.Base == MockVector(100.001, 0, 0)
+
+def test_resolve_bi_collision(resolver):
+    # p1 at (0,0), size 100x100
+    p1 = MockObj("p1", MockPlacement(MockVector(0, 0, 0)), MockShape(MockBoundBox(0, 100, 0, 100)))
+    # p2 at (80, 0), size 100x100 -> overlap of 20 in X
+    p2 = MockObj("p2", MockPlacement(MockVector(80, 0, 0)), MockShape(MockBoundBox(0, 100, 0, 100)))
+    
+    # resolve_bi_collision should shift both by 10/2 + epsilon/2 = ~10
+    # Wait, shift = ox / 2.0. ox = 20.001. shift = 10.0005
+    # dir_x for p1 (center_x=50) vs p2 (center_x=130): 1.0 if 50 > 130 else -1.0 -> -1.0
+    # p1 shift: -10.0005
+    # p2 shift: -(-10.0005) = 10.0005
+    # p1 new x: 0 - 10.0005 = -10.0005
+    # p2 new x: 80 + 10.0005 = 90.0005
+    
+    resolved = resolver.resolve_bi_collision(p1, p2)
+    assert resolved
+    assert abs(p1.Placement.Base.x - (-10.0005)) < 1e-4
+    assert abs(p2.Placement.Base.x - (90.0005)) < 1e-4

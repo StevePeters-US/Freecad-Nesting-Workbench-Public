@@ -314,3 +314,299 @@ ManualNester/
 - **Lines changed**: ~15
 
 ### ~~M-012~~: SKIP — `__init__.py` already exists
+
+---
+
+## Tier 0 — Bug Fixes (do these first)
+
+### M-B01: Scroll wheel handler is unreachable dead code
+- [ ] **File**: `nestingworkbench/Tools/ManualNester/manual_nester_tool.py` (MODIFY)
+- **What**: The scroll wheel handler at line 310 (`elif event_type == "SoMouseButtonEvent"`) is dead code — it can never execute because line 263 already handles the same event type with `if event_type == "SoMouseButtonEvent"`. The `elif` is after the first `if` match, so it's skipped.
+- **Fix**: Move the BUTTON4/BUTTON5 (scroll) handling INTO the existing `SoMouseButtonEvent` block at line 263, alongside the BUTTON1 and BUTTON2 handlers. Add it as an `elif btn in ["BUTTON4", "BUTTON5"]:` clause after the BUTTON2 handler (around line 297).
+- **Delete**: Remove the entire dead `elif event_type == "SoMouseButtonEvent":` block (lines 309–329).
+- **Lines changed**: ~15
+
+### M-B02: Access violation on right-click / cancel when no drag active
+- [ ] **File**: `nestingworkbench/Tools/ManualNester/manual_nester_tool.py` (MODIFY)
+- **What**: Right-clicking calls `cancel_operation()` even when the tool is IDLE (no active drag). This can cause access violations when iterating `self.pre_drag_placements` if objects have been deleted, or when `self.layout_group` is None after cleanup.
+- **Root cause**: `cancel_operation()` at line 579 iterates `self.pre_drag_placements` and accesses `self.layout_group.Document.Objects` without checking if `self.layout_group` is still valid. After `cleanup()` sets `self.layout_group = None`, a stale callback could still fire.
+- **Fix**:
+  1. Add an early return to `cancel_operation()` if `self.mode == "IDLE"` (nothing to cancel).
+  2. Guard the `pre_drag_placements` loop: wrap in `if self.layout_group:` check.
+  3. In the BUTTON2 handler (line 292), only call `cancel_operation()` if `self.mode != "IDLE"`. Otherwise, just consume the event (`return True`).
+  4. Add a guard to `eventCallback()` top: `if not self.layout_group: return False` — this is already there at line 230, so verify it works for all paths.
+- **Lines changed**: ~8
+
+### M-B03: `_get_obj_center()` crashes on App::Part containers
+- [ ] **File**: `nestingworkbench/Tools/ManualNester/manual_nester_tool.py` (MODIFY)
+- **What**: `_get_obj_center()` at line 505 accesses `obj.Shape.BoundBox`, but tracked objects can be `App::Part` containers which don't have a `.Shape` attribute. This causes an `AttributeError` or access violation. Same issue affects `collision_resolver.py`'s `clamp_to_sheet()` and `_get_abs_bbox()`.
+- **Fix for `_get_obj_center()`**: Walk into the App::Part to find the first child with a Shape, or use `obj.Shape.BoundBox` if available:
+  ```python
+  def _get_obj_center(self, obj):
+      """Returns the XY center of an object's bounding box as a FreeCAD.Vector."""
+      bb = self._get_shape_bbox(obj)
+      if not bb:
+          # Fallback: use placement as center
+          return FreeCAD.Vector(obj.Placement.Base.x, obj.Placement.Base.y, 0)
+      return FreeCAD.Vector(
+          (bb.XMin + bb.XMax) / 2,
+          (bb.YMin + bb.YMax) / 2,
+          0
+      )
+
+  def _get_shape_bbox(self, obj):
+      """Returns the global BoundBox for an object, handling App::Part containers."""
+      if hasattr(obj, "Shape") and hasattr(obj.Shape, "BoundBox"):
+          bb = obj.Shape.BoundBox
+          # BoundBox is in local coords — offset by Placement
+          return FreeCAD.BoundBox(
+              bb.XMin + obj.Placement.Base.x, bb.YMin + obj.Placement.Base.y, bb.ZMin,
+              bb.XMax + obj.Placement.Base.x, bb.YMax + obj.Placement.Base.y, bb.ZMax
+          )
+      # App::Part: try children
+      if hasattr(obj, "Group"):
+          for child in obj.Group:
+              result = self._get_shape_bbox(child)
+              if result:
+                  return result
+      return None
+  ```
+- **Fix for `collision_resolver.py`**: Make `clamp_to_sheet()` and `_get_abs_bbox()` accept an optional pre-computed bbox, or have the caller pass the bbox instead of the raw object. The simplest approach: have `_apply_physics()` in the tool pass the bbox to the resolver, or add the same `_get_shape_bbox` pattern to the resolver.
+- **Lines changed**: ~30
+
+### M-B04: Physics pushes parts in drag direction — should use repulsion from dragged part
+- [ ] **File**: `nestingworkbench/Tools/ManualNester/physics_engine.py` (MODIFY)
+- **What**: Currently `compute_displacements()` moves ALL nearby parts in the same direction as `drag_delta`. This is proportional-editing style (move with), but causes parts to pile up on top of each other when dragged into a cluster. Parts should be pushed AWAY from the dragged part, not in the drag direction.
+- **Fix**: Change displacement to use a repulsion vector (from dragged center toward the other part's center), not the drag direction:
+  ```python
+  def compute_displacements(self, dragged_center, drag_delta, parts_with_centers):
+      displacements = []
+      for obj, center in parts_with_centers:
+          dx = center.x - dragged_center.x
+          dy = center.y - dragged_center.y
+          distance = (dx**2 + dy**2)**0.5
+
+          factor = self.compute_falloff(distance) * self.strength
+          if factor < 0.001 or distance < 0.001:
+              displacements.append((obj, type(drag_delta)(0, 0, 0)))
+              continue
+
+          # Repulsion: push away from dragged part center
+          # Scale by drag_delta magnitude so the push is proportional to drag speed
+          push_magnitude = drag_delta.Length * factor
+          # Direction: from dragged center toward this part
+          repulse_x = dx / distance * push_magnitude
+          repulse_y = dy / distance * push_magnitude
+
+          displacements.append((obj, type(drag_delta)(repulse_x, repulse_y, 0)))
+      return displacements
+  ```
+- **Behavior change**: Parts near the dragged part will now scatter outward radially instead of all sliding in the drag direction. This feels more like a physics simulation.
+- **Lines changed**: ~15
+
+### M-B05: `_apply_physics()` never calls `separate_overlapping()` for inter-part collisions
+- [ ] **File**: `nestingworkbench/Tools/ManualNester/manual_nester_tool.py` (MODIFY)
+- **What**: After displacing parts via physics, `_apply_physics()` only clamps to sheet boundaries. It never calls `self.collision_resolver.separate_overlapping()`, so displaced parts freely overlap each other.
+- **Fix**: After the clamping loop, add overlap resolution:
+  ```python
+  # After clamping loop, resolve inter-part overlaps
+  all_tracked = [obj for obj in self.original_placements if obj != self.selected_obj]
+  for obj in displaced_objs:
+      others = [o for o in all_tracked if o != obj]
+      self.collision_resolver.separate_overlapping(obj, others, max_iterations=3)
+
+  # Re-clamp after separation (separation might push parts outside sheet)
+  for obj in displaced_objs:
+      sheet_group = self._find_sheet_at_pos(obj.Placement.Base)
+      if sheet_group:
+          boundary = next((c for c in sheet_group.Group if c.Label.startswith("Sheet_Boundary_")), None)
+          if boundary:
+              self.collision_resolver.clamp_to_sheet(obj, boundary.Shape.BoundBox)
+  ```
+- **Note**: This depends on M-B03 being fixed first (so `_get_abs_bbox` works with App::Part).
+- **Lines changed**: ~12
+
+### M-B06: `collision_resolver._get_abs_bbox()` crashes on App::Part objects
+- [ ] **File**: `nestingworkbench/Tools/ManualNester/collision_resolver.py` (MODIFY)
+- **What**: `_get_abs_bbox()` at line 112 accesses `obj.Shape.BoundBox` directly, which crashes for `App::Part` containers. Same issue as M-B03 but in the collision resolver.
+- **Fix**: Add a helper to walk into containers and find a child with a Shape:
+  ```python
+  def _get_abs_bbox(self, obj):
+      """Helper to get absolute bounding box as a dict."""
+      bb = self._find_bbox(obj)
+      if not bb:
+          # Fallback: zero-size bbox at placement
+          pos = obj.Placement.Base
+          return {
+              'min_x': pos.x, 'max_x': pos.x,
+              'min_y': pos.y, 'max_y': pos.y,
+              'center_x': pos.x, 'center_y': pos.y
+          }
+      pos = obj.Placement.Base
+      return {
+          'min_x': pos.x + bb.XMin,
+          'max_x': pos.x + bb.XMax,
+          'min_y': pos.y + bb.YMin,
+          'max_y': pos.y + bb.YMax,
+          'center_x': pos.x + bb.XMin + bb.XLength / 2,
+          'center_y': pos.y + bb.YMin + bb.YLength / 2
+      }
+
+  def _find_bbox(self, obj):
+      """Finds BoundBox, walking into App::Part containers if needed."""
+      if hasattr(obj, "Shape") and hasattr(obj.Shape, "BoundBox"):
+          return obj.Shape.BoundBox
+      if hasattr(obj, "Group"):
+          for child in obj.Group:
+              result = self._find_bbox(child)
+              if result:
+                  return result
+      return None
+  ```
+- **Also fix `clamp_to_sheet()`**: Replace `bb = obj.Shape.BoundBox` with `bb = self._find_bbox(obj)` and add a guard: `if not bb: return False`.
+- **Lines changed**: ~25
+
+### M-B07: Support click-to-grab, move, click-to-drop workflow (free-grab mode) (completed)
+- [x] **File**: `nestingworkbench/Tools/ManualNester/manual_nester_tool.py` (MODIFY)
+- **What**: The tool only supports hold-and-drag (mouse DOWN → drag → mouse UP to drop). Users expect click-to-pick, move freely, click-to-place — like Blender's G key. Currently, clicking a master shape creates a clone on mouse DOWN, but mouse UP fires immediately and `handle_release()` can't find a sheet (clone is still at the master position below the sheet), so the clone is destroyed.
+- **Root cause**: `handle_release()` is called on every mouse UP, even if the user just clicked (didn't drag). There's no state where the part follows the cursor after releasing the button.
+- **Fix — Add a `is_free_grab` state**:
+  1. Add `self.is_free_grab = False` to `__init__()` (next to `self.is_implicit_drag`).
+  2. **Master clone click** (`handle_click`, line 358–371): After creating the clone, set `self.is_free_grab = True` instead of `self.is_implicit_drag = True`. The clone should follow the cursor without requiring the mouse button to be held.
+  3. **Existing part click** (`handle_click`, line 370–381): On mouse DOWN on an existing part, just prepare for drag as now (set `start_placement`, etc.). No change needed here — hold-drag still works.
+  4. **`handle_move()` (line 387)**: Change the guard from:
+     ```python
+     if not self.selected_obj or not self.is_mouse_down:
+         return
+     ```
+     to:
+     ```python
+     if not self.selected_obj or (not self.is_mouse_down and not self.is_free_grab):
+         return
+     ```
+     Also skip the drag threshold check when `is_free_grab` is True (the grab is already confirmed):
+     ```python
+     if not self.is_implicit_drag and not self.is_free_grab:
+         # ... threshold check ...
+     ```
+     And treat `is_free_grab` as equivalent to `is_implicit_drag` for physics/indicator:
+     ```python
+     if not self.is_implicit_drag and not self.is_free_grab:
+         return
+     ```
+  5. **`handle_click()` (line 340)** — Handle click-to-drop: At the very TOP of `handle_click`, before picking a new object, check if we're in free-grab mode. If so, this click is a DROP, not a new pick:
+     ```python
+     def handle_click(self, pos):
+         # If in free-grab mode, this click DROPS the part
+         if self.is_free_grab and self.selected_obj:
+             target_sheet = self._find_sheet_at_pos(self.selected_obj.Placement.Base)
+             if target_sheet:
+                 shapes_group = next((c for c in target_sheet.Group if c.Label.startswith("Shapes_")), None)
+                 if shapes_group:
+                     shapes_group.addObject(self.selected_obj)
+                 FreeCAD.Console.PrintMessage(f"Manual Nester: Placed {self.selected_obj.Label}.\n")
+             else:
+                 # Dropped outside any sheet
+                 if self.selected_obj in self.new_objects:
+                     self._revert_single_object(self.selected_obj)
+                     FreeCAD.Console.PrintMessage("Dropped outside sheet: clone removed.\n")
+             self.is_free_grab = False
+             self.finish_operation()
+             return
+         # ... rest of existing handle_click ...
+     ```
+  6. **`handle_release()` (line 550)**: When in free-grab mode, do NOT finish. Just clear `is_mouse_down`:
+     ```python
+     def handle_release(self):
+         if self.is_free_grab:
+             # In free-grab mode, mouse release doesn't place the part.
+             # The next click will handle that.
+             self.is_mouse_down = False
+             return
+         # ... rest of existing handle_release ...
+     ```
+  7. **`cancel_operation()` and `finish_operation()`**: Reset `self.is_free_grab = False`.
+  8. **`eventCallback`**: For `SoLocation2Event`, also consume the event when `is_free_grab` is True:
+     ```python
+     if self.mode != "IDLE" or self.is_free_grab:
+         return True
+     ```
+- **Also consider**: Allowing existing parts to be picked via single click (not just hold-drag). This can be done by making `handle_release()` enter free-grab mode when `is_implicit_drag` is False and `selected_obj` is set:
+  ```python
+  # In handle_release, after the is_free_grab guard:
+  if not self.is_implicit_drag and self.selected_obj:
+      # User clicked without dragging — enter free-grab mode
+      self.is_free_grab = True
+      self.is_mouse_down = False
+      self.is_implicit_drag = False
+      FreeCAD.Console.PrintMessage(f"Free grab: {self.selected_obj.Label}. Click to place.\n")
+      return
+  ```
+- **Lines changed**: ~40
+
+### M-B08: Access violation in `cleanup()` after `cancel()` removes objects (completed)
+- [x] **File**: `nestingworkbench/Tools/ManualNester/manual_nester_tool.py` (MODIFY)
+- **What**: When right-clicking, FreeCAD's native handling closes the task panel (calls `reject()` → `cancel()` → `cleanup()`). `cancel()` removes `new_objects` via `doc.removeObject()`, deleting them at the C++ level. But these objects are still in `original_visibilities`. When `cleanup()` then iterates `original_visibilities` and accesses `obj.ViewObject.Visibility` on a deleted C++ wrapper → **Access violation**. Python's `hasattr()` is not safe on deleted FreeCAD objects.
+- **Fix**:
+  1. In `cancel()` (line 751), after removing each `new_object`, also purge it from `self.original_visibilities` and `self.original_placements`:
+     ```python
+     def cancel(self):
+         if self.original_placements:
+             for obj, placement in self.original_placements.items():
+                 if obj and obj in self.layout_group.Document.Objects:
+                     obj.Placement = placement
+
+         # Build set of names we're about to delete, for cleanup
+         deleted_names = set()
+         for obj in reversed(self.new_objects):
+             try:
+                 deleted_names.add(obj.Name)
+                 self.layout_group.Document.removeObject(obj.Name)
+             except Exception as e:
+                 FreeCAD.Console.PrintWarning(f"[ManualNesterTool] Failed to remove {obj.Name}: {e}\n")
+         self.new_objects = []
+
+         # Purge deleted objects from tracking dicts to prevent access violations in cleanup()
+         self.original_placements = {k: v for k, v in self.original_placements.items()
+                                      if not isinstance(k, str) and hasattr(k, 'Name') and k.Name not in deleted_names}
+         self.original_visibilities = {k: v for k, v in self.original_visibilities.items()
+                                        if isinstance(k, str) or (hasattr(k, 'Name') and k.Name not in deleted_names)}
+
+         FreeCAD.Console.PrintMessage("Manual Nester: Transformations cancelled and new items removed.\n")
+     ```
+  2. In `cleanup()`, wrap the visibility restoration loop in a try/except per object to catch any remaining stale references:
+     ```python
+     for obj, is_visible in self.original_visibilities.items():
+         try:
+             if not isinstance(obj, str) and hasattr(obj, "ViewObject") and obj.ViewObject:
+                 obj.ViewObject.Visibility = is_visible
+         except Exception:
+             pass  # Object was already deleted
+     ```
+  3. Also hide the radius indicator in `cleanup()` (in case it wasn't hidden):
+     ```python
+     self._hide_radius_indicator()
+     ```
+- **Lines changed**: ~20
+
+### M-B09: `resolve_bi_collision()` placement changes don't persist (completed)
+- [x] **File**: `nestingworkbench/Tools/ManualNester/collision_resolver.py` (MODIFY)
+- **What**: `resolve_bi_collision()` uses `obj.Placement.Base += FreeCAD.Vector(...)` to separate overlapping parts. In FreeCAD, `Placement.Base` returns a copy — `+=` modifies the copy without setting it back via the property setter. Result: parts appear to collide but overlap freely because the separation has no effect.
+- **Fix**: Replace `Placement.Base += vec` with `Placement.Base = Placement.Base + vec` (explicit assignment triggers the property setter).
+- **Lines changed**: ~4
+
+### M-B10: Click-without-drag enters free-grab mode, causing toggle behavior (completed)
+- [x] **File**: `nestingworkbench/Tools/ManualNester/manual_nester_tool.py` (MODIFY)
+- **What**: `handle_release()` enters free-grab mode on every click-without-drag on an existing part. This causes a toggling loop: click → pick up → click to drop → picks up again (or toggles between part and container). User expects hold-to-drag, release-to-drop for existing parts.
+- **Fix**: Remove the free-grab-on-click entry for existing parts. When a click-without-drag occurs on an existing part, call `finish_operation()` (no-op). Free-grab remains active only for master clones (set in `handle_click` when `is_master` is True).
+- **Lines changed**: ~5
+
+### M-B11: Access violation from force-drop during event callback (completed)
+- [x] **File**: `nestingworkbench/Tools/ManualNester/manual_nester_tool.py` (MODIFY)
+- **What**: When FreeCAD swallows a mouse UP event, the next DOWN event calls `handle_release()` synchronously. This modifies the Coin3D scene graph (via `_hide_radius_indicator`) and calls `FreeCADGui.Selection.clearSelection()` from within an event callback, causing access violations that loop as mouse events continue to fire.
+- **Fix**:
+  1. Defer the force-drop via `QTimer.singleShot(0, self._deferred_force_drop)` so scene graph changes happen outside the event callback.
+  2. Wrap `_hide_radius_indicator` scene graph removal in try/except.
+  3. Wrap `FreeCADGui.Selection.clearSelection()` in try/except in `finish_operation()`.
+  4. Wrap deferred add/revert callbacks in try/except with warning messages.
+- **Lines changed**: ~25

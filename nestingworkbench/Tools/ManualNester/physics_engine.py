@@ -24,38 +24,53 @@ class PhysicsEngine:
             return 1.0
         return max(0.0, 1.0 - (distance / self.radius) ** self.curve_exponent)
 
-    def compute_displacements(self, dragged_center, drag_delta, parts_with_centers):
+    def compute_displacements(self, dragged_center, dragged_width, dragged_height, drag_delta, parts_info):
         """
-        Compute displacement vectors for all parts based on proximity to dragged part.
+        Compute displacement vectors for all parts based on gap distance to dragged part.
+        Parts are pushed AWAY from the dragged part center (repulsion).
 
         Args:
             dragged_center: FreeCAD.Vector — current center of the dragged part
+            dragged_width: float — width of dragged part (X)
+            dragged_height: float — height of dragged part (Y)
             drag_delta: FreeCAD.Vector — how much the dragged part moved this frame
-            parts_with_centers: list of (obj, FreeCAD.Vector) — other parts and their centers
+            parts_info: list of (obj, center, width, height) — other parts
 
         Returns:
             list of (obj, FreeCAD.Vector) — each part and its displacement vector
         """
         displacements = []
-        for obj, center in parts_with_centers:
-            # Calculate distance between centers (XY plane only)
+        for obj, center, width, height in parts_info:
+            # Calculate center-to-center distance
             dx = center.x - dragged_center.x
             dy = center.y - dragged_center.y
-            distance = (dx**2 + dy**2)**0.5
+            center_distance = (dx**2 + dy**2)**0.5
 
-            factor = self.compute_falloff(distance) * self.strength
+            if center_distance < 0.001:
+                # Exactly at center? Random nudge or skip
+                displacements.append((obj, type(drag_delta)(0, 0, 0)))
+                continue
+
+            # Edge-to-edge (gap) distance calculation
+            # Subtract half-extents of both parts from the center-to-center components
+            gap_x = max(0.0, abs(dx) - (dragged_width + width) / 2.0)
+            gap_y = max(0.0, abs(dy) - (dragged_height + height) / 2.0)
+            edge_distance = (gap_x**2 + gap_y**2)**0.5
+
+            # Force falloff based on the gap distance
+            factor = self.compute_falloff(edge_distance) * self.strength
             
-            # Displacement is drag_delta scaled by falloff factor
-            # We assume FreeCAD.Vector supports multiplication by scalar and addition
-            # But since this file is standalone, we'll return a way to compute it or a vector-like object
-            # The tool will handle the actual FreeCAD.Vector addition.
-            # To keep it standalone, we'll assume drag_delta has .x, .y, .z and return same.
+            if factor < 0.001:
+                displacements.append((obj, type(drag_delta)(0, 0, 0)))
+                continue
+
+            # Repulsion direction: always push away from dragged part center
+            push_magnitude = drag_delta.Length * factor
             
-            displacement_vec = type(drag_delta)(
-                drag_delta.x * factor,
-                drag_delta.y * factor,
-                drag_delta.z * factor
-            )
+            repulse_x = dx / center_distance * push_magnitude
+            repulse_y = dy / center_distance * push_magnitude
+            
+            displacement_vec = type(drag_delta)(repulse_x, repulse_y, 0)
             displacements.append((obj, displacement_vec))
             
         return displacements

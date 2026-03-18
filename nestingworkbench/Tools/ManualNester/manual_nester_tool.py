@@ -42,16 +42,20 @@ class ManualNesterToolObserver:
         self.constraint = None # None, "X", "Y"
         self.constraint_lock_pos = None # Vector where the constraint was activated
         self.is_mouse_down = False
+        self.last_down_time = 0.0
         self.is_implicit_drag = False
+        self.is_free_grab = False  # M-B07: click-to-grab, click-to-drop mode
         self.drag_start_screen_pos = (0,0)
         self.last_known_screen_pos = (0,0)
         self.pre_drag_placements = {} # Track placements for undo/cancel (M-009)
         self.radius_indicator = None # M-010: Coin3D overlay for influence radius
+        self.warned_missing_bounds = set() # M-B08: One-time debug warning for no-bounds parts
 
         # Physics initialization
         self.physics_engine = PhysicsEngine()
         self.collision_resolver = CollisionResolver()
         self.physics_enabled = True
+        self.obj_to_sheet = {} # Track which sheet each object belongs to
 
         # Connect UI signals
         if hasattr(self.panel_manager, 'form'):
@@ -179,7 +183,7 @@ class ManualNesterToolObserver:
                                         break
                             
                             if is_top_level and (obj.TypeId == "App::Part" or hasattr(obj, "Shape")):
-                                self._track_single_object(obj)
+                                self._track_single_object(obj, sheet_group)
                 
                 # Make existing sheet boundary unselectable
                 if sheet_boundary and hasattr(sheet_boundary, "ViewObject"):
@@ -197,8 +201,11 @@ class ManualNesterToolObserver:
                 # because we don't want to move them, but we might pick them.
                 pass
 
-    def _track_single_object(self, obj):
+    def _track_single_object(self, obj, sheet_group=None):
         self.original_placements[obj] = obj.Placement.copy()
+        if sheet_group:
+            self.obj_to_sheet[obj] = sheet_group
+        
         if hasattr(obj, "ViewObject"):
             self.original_visibilities[obj] = obj.ViewObject.Visibility
             
@@ -261,15 +268,31 @@ class ManualNesterToolObserver:
 
             # --- MOUSE BUTTON HANDLING ---
             if event_type == "SoMouseButtonEvent":
-                pos = event_dict["Position"]
-                btn = event_dict["Button"]
-                state = event_dict["State"]
+                FreeCAD.Console.PrintMessage(f"\n[RAW MOUSE EVENT DICT]: {event_dict}\n")
                 
-                if btn == "BUTTON1": # Left Button
+                pos = event_dict.get("Position", (0, 0))
+                btn = event_dict.get("Button")
+                state = event_dict.get("State")
+                
+                if btn in ["BUTTON1", 1]: # Left Button
                     if state == "DOWN":
-                        if self.is_mouse_down: # Guard against repeat DOWN events from FreeCAD
-                             return True
+                        import time
+                        current_time = time.time()
                         
+                        # Guard against rapid repeat DOWN events
+                        if self.is_mouse_down and (current_time - self.last_down_time < 0.2):
+                             return True
+                        self.last_down_time = current_time
+
+                        # If FreeCAD lost our UP event while dragging, force a drop.
+                        # IMPORTANT: Defer via QTimer to avoid modifying the Coin3D
+                        # scene graph from within an event callback (causes access violation).
+                        if self.is_mouse_down:
+                             if self.is_implicit_drag or self.is_free_grab:
+                                 FreeCAD.Console.PrintMessage("Manual Nester: Forcing drop (missed UP event).\n")
+                                 QtCore.QTimer.singleShot(0, self._deferred_force_drop)
+                                 return True
+
                         if event_dict.get("DoubleClick", False):
                             return True
                         
@@ -289,12 +312,33 @@ class ManualNesterToolObserver:
                             self.handle_release()
                         return True
                 
-                elif btn == "BUTTON2": # Right Button (Cancel)
+                elif btn in ["BUTTON2", "BUTTON3", 2, 3]: # Right Button (Cancel)
                     if state == "DOWN":
-                         self.cancel_operation()
-                         return True
+                        if self.mode != "IDLE" or self.is_free_grab:
+                            self.cancel_operation()
+                        return True
                     else: # UP
                          return True # Consume to prevent context menu
+                
+                # --- MOUSE WHEEL HANDLING: Ctrl+Scroll adjusts physics radius ---
+                elif btn in ["BUTTON4", "BUTTON5", 4, 5]:
+                    ctrl_held = event_dict.get("Ctrl", False) or event_dict.get("Control", False)
+                    if state == "DOWN" and ctrl_held:
+                        delta = 25.0 if btn in ["BUTTON4", 4] else -25.0
+                        new_radius = max(25.0, min(2000.0, self.physics_engine.radius + delta))
+                        self.physics_engine.radius = new_radius
+
+                        # Sync to UI
+                        if hasattr(self.panel_manager, 'form'):
+                            self.panel_manager.form.radius_spin.setValue(new_radius)
+
+                        # Update indicator if actively dragging/grabbing
+                        active = (self.is_mouse_down and self.is_implicit_drag) or self.is_free_grab
+                        if active:
+                             self.handle_move(self.last_known_screen_pos, True,
+                                             event_dict.get("Shift", False))
+                        return True
+                    # Without Ctrl, don't consume — let FreeCAD handle zoom
 
             # --- MOUSE MOVE HANDLING ---
             elif event_type == "SoLocation2Event":
@@ -303,30 +347,9 @@ class ManualNesterToolObserver:
                 snap = event_dict.get("Ctrl", False) or event_dict.get("Control", False)
                 shift = event_dict.get("Shift", False)
                 self.handle_move(pos, snap, shift)
-                
-                if self.mode != "IDLE": return True
+
+                if self.mode != "IDLE" or self.is_free_grab: return True
             
-            # --- MOUSE WHEEL HANDLING (M-011) ---
-            elif event_type == "SoMouseButtonEvent":
-                btn = event_dict["Button"]
-                state = event_dict["State"]
-                if self.pressed or self.is_mouse_down:
-                    if btn in ["BUTTON4", "BUTTON5"] and state == "DOWN":
-                        # BUTTON4 = Scroll Up, BUTTON5 = Scroll Down
-                        delta = 25.0 if btn == "BUTTON4" else -25.0
-                        new_radius = max(25.0, min(2000.0, self.physics_engine.radius + delta))
-                        self.physics_engine.radius = new_radius
-                        
-                        # Sync to UI
-                        if hasattr(self.panel_manager, 'form'):
-                            self.panel_manager.form.radius_spin.setValue(new_radius)
-                        
-                        # Update indicator immediately if dragging
-                        if self.is_implicit_drag:
-                             self.handle_move(self.last_known_screen_pos, 
-                                             event_dict.get("Ctrl", False), 
-                                             event_dict.get("Shift", False))
-                        return True
 
             return False
 
@@ -334,9 +357,65 @@ class ManualNesterToolObserver:
             FreeCAD.Console.PrintWarning(f"[ManualNesterTool] Event callback failed: {e}\n")
             return False
 
+    def _deferred_force_drop(self):
+        """Called via QTimer to safely handle a missed UP event outside the event callback."""
+        try:
+            if not self.layout_group:
+                return
+            self.handle_release()
+        except Exception as e:
+            FreeCAD.Console.PrintWarning(f"[ManualNesterTool] Deferred force-drop failed: {e}\n")
+            # Reset to a safe state
+            self.finish_operation()
+            self.is_mouse_down = False
+
+    def _deferred_add_object_to_group(self, shapes_group_name, selected_obj_name):
+        try:
+            doc = FreeCAD.ActiveDocument
+            if self.layout_group and hasattr(self.layout_group, 'Document'):
+                doc = self.layout_group.Document
+            if doc:
+                grp = doc.getObject(shapes_group_name)
+                obj = doc.getObject(selected_obj_name)
+                if grp and obj:
+                    grp.addObject(obj)
+        except Exception as e:
+            FreeCAD.Console.PrintWarning(f"[ManualNesterTool] Deferred add failed: {e}\n")
+                
+    def _deferred_revert_single_object(self, obj_name):
+        try:
+            doc = FreeCAD.ActiveDocument
+            if self.layout_group and hasattr(self.layout_group, 'Document'):
+                doc = self.layout_group.Document
+            if doc:
+                obj = doc.getObject(obj_name)
+                if obj:
+                    if obj in self.new_objects:
+                        self.new_objects.remove(obj)
+                    doc.removeObject(obj_name)
+        except Exception as e:
+            FreeCAD.Console.PrintWarning(f"[ManualNesterTool] Deferred revert failed: {e}\n")
+
     def handle_click(self, pos):
         """On mouse down: Select object and start interaction."""
-        
+
+        # M-B07: If in free-grab mode, this click DROPS the part
+        if self.is_free_grab and self.selected_obj:
+            FreeCAD.Console.PrintMessage(f"Manual Nester: Attempting to place {self.selected_obj.Label}...\n")
+            target_sheet = self._find_sheet_at_pos(self.selected_obj.Placement.Base)
+            if target_sheet:
+                shapes_group = next((c for c in target_sheet.Group if c.Label.startswith("Shapes_")), None)
+                if shapes_group:
+                    QtCore.QTimer.singleShot(0, lambda g=shapes_group.Name, o=self.selected_obj.Name: self._deferred_add_object_to_group(g, o))
+                FreeCAD.Console.PrintMessage(f"Manual Nester: Deferred placement of {self.selected_obj.Label}.\n")
+            else:
+                if self.selected_obj in self.new_objects:
+                    QtCore.QTimer.singleShot(0, lambda o=self.selected_obj.Name: self._deferred_revert_single_object(o))
+                    FreeCAD.Console.PrintMessage("Dropped outside sheet: clone implicitly scheduled for removal.\n")
+            self.is_free_grab = False
+            self.finish_operation()
+            return
+
         clicked_obj = self.pick_object(pos)
         FreeCAD.Console.PrintMessage(f"Manual Nester: Picked {clicked_obj.Label if clicked_obj else 'None'}\n")
         
@@ -353,18 +432,17 @@ class ManualNesterToolObserver:
                 else: p = None
         
         if is_master:
-            # BUG FIX: Restore the cloning call that was accidentally removed
             self.start_pos = self.view.getPoint(pos[0], pos[1])
             new_obj = self._clone_part_from_master(clicked_obj)
             if new_obj:
                 clicked_obj = new_obj
-                # Instantly enter TRANSLATE mode from Master Click
+                # Enter free-grab mode: clone follows cursor, next click drops it
                 self.selected_obj = clicked_obj
                 self.drag_start_screen_pos = pos
                 self.start_placement = self.selected_obj.Placement.copy()
                 self.set_mode("TRANSLATE")
-                self.is_implicit_drag = True
-                FreeCAD.Console.PrintMessage(f"Manual Nester: Created clone {clicked_obj.Label}.\n")
+                self.is_free_grab = True
+                FreeCAD.Console.PrintMessage(f"Manual Nester: Created clone {clicked_obj.Label}. Click to place.\n")
             return
 
         if clicked_obj:
@@ -382,12 +460,13 @@ class ManualNesterToolObserver:
             self.selected_obj = None
 
     def handle_move(self, pos, snap=False, shift_held=False):
-        if not self.selected_obj or not self.is_mouse_down: 
+        if not self.selected_obj or (not self.is_mouse_down and not self.is_free_grab):
             return
-        
+
         # DYNAMIC MODE SWITCH: If Shift is held/released during drag, switch mode
+        active_drag = self.is_implicit_drag or self.is_free_grab
         target_mode = "ROTATE" if shift_held else "TRANSLATE"
-        if self.mode != target_mode and self.is_implicit_drag:
+        if self.mode != target_mode and active_drag:
              # Capture current state as new base for the switch
              FreeCAD.Console.PrintMessage(f"Manual Nester: Mode switched to {target_mode} while dragging.\n")
              self.start_placement = self.selected_obj.Placement.copy()
@@ -395,15 +474,15 @@ class ManualNesterToolObserver:
              self.start_pos = self.view.getPoint(pos[0], pos[1])
              self.set_mode(target_mode)
 
-        # Check drag threshold if not already dragging
-        if not self.is_implicit_drag:
+        # Check drag threshold if not already dragging (skip for free-grab)
+        if not self.is_implicit_drag and not self.is_free_grab:
              dx = pos[0] - self.drag_start_screen_pos[0]
              dy = pos[1] - self.drag_start_screen_pos[1]
              if math.sqrt(dx*dx + dy*dy) > 5:
                  self.is_implicit_drag = True
                  FreeCAD.Console.PrintMessage(f"Manual Nester: Drag threshold met in {self.mode}\n")
-        
-        if not self.is_implicit_drag: return
+
+        if not self.is_implicit_drag and not self.is_free_grab: return
         
         if self.mode == "TRANSLATE":
             if not self.start_pos: return
@@ -470,18 +549,23 @@ class ManualNesterToolObserver:
         if not self.physics_engine or not self.physics_enabled:
             return
 
-        dragged_center = self._get_obj_center(self.selected_obj)
+        drag_info = self._get_obj_phys_info(self.selected_obj)
+        if not drag_info: return
+        dragged_center, d_w, d_h = drag_info
 
-        # Collect other parts and their centers
-        parts_with_centers = []
+        # Collect other parts and their centers/dims
+        parts_info = []
         for obj in self.original_placements:
             if obj == self.selected_obj:
                 continue
-            parts_with_centers.append((obj, self._get_obj_center(obj)))
+            info = self._get_obj_phys_info(obj)
+            if info:
+                c, w, h = info
+                parts_info.append((obj, c, w, h))
 
-        # Compute and apply displacements
+        # Compute and apply displacements (using gap distance)
         displacements = self.physics_engine.compute_displacements(
-            dragged_center, drag_delta, parts_with_centers
+            dragged_center, d_w, d_h, drag_delta, parts_info
         )
         
         displaced_objs = []
@@ -494,39 +578,114 @@ class ManualNesterToolObserver:
                 obj.Placement.Base = obj.Placement.Base + displacement
                 displaced_objs.append(obj)
 
-        # Resolve collisions: clamp to sheets
-        for obj in displaced_objs:
-            sheet_group = self._find_sheet_at_pos(obj.Placement.Base)
-            if sheet_group:
-                boundary = next((c for c in sheet_group.Group if c.Label.startswith("Sheet_Boundary_")), None)
-                if boundary:
-                    self.collision_resolver.clamp_to_sheet(obj, boundary.Shape.BoundBox)
+        # 2. Iteratively resolve all collisions in the layout to create chain reaction (Relaxation)
+        all_tracked = [o for o in self.original_placements if o != self.selected_obj]
+        
+        for _ in range(3):
+            any_moved = False
+            for i, obj in enumerate(all_tracked):
+                # A. Clamp to its persistent sheet (GLOBAL COORDS)
+                sheet_group = self.obj_to_sheet.get(obj)
+                if sheet_group:
+                    boundary = next((c for c in sheet_group.Group if c.Label.startswith("Sheet_Boundary_")), None)
+                    if boundary and hasattr(boundary, "Shape") and hasattr(boundary.Shape, "BoundBox"):
+                        # Calculate Global Sheet BBox
+                        s_bb = boundary.Shape.BoundBox
+                        s_pos = boundary.Placement.Base
+                        global_sheet_bb = FreeCAD.BoundBox(
+                            s_bb.XMin + s_pos.x, s_bb.YMin + s_pos.y, s_bb.ZMin,
+                            s_bb.XMax + s_pos.x, s_bb.YMax + s_pos.y, s_bb.ZMax
+                        )
+                        if self.collision_resolver.clamp_to_sheet(obj, global_sheet_bb):
+                             any_moved = True
+                
+                # B. Separate from neighbors (Symmetric push)
+                for other in all_tracked[i+1:]:
+                    if self.collision_resolver.resolve_bi_collision(obj, other):
+                        any_moved = True
+            
+            if not any_moved: break
 
-    def _get_obj_center(self, obj):
-        """Returns the XY center of an object's bounding box as a FreeCAD.Vector."""
-        bb = obj.Shape.BoundBox
-        # Note: Placement.Base is already in global coordinates if it's a top-level layout part.
-        # BoundBox is local to the object.
-        return FreeCAD.Vector(
-            bb.XMin + bb.XLength / 2 + obj.Placement.Base.x,
-            bb.YMin + bb.YLength / 2 + obj.Placement.Base.y,
-            0
-        )
+    def _get_shape_bbox(self, obj, parent_placement=None):
+        """Returns the global BoundBox for an object, prioritizing BoundaryObject."""
+        # Accumulate placement through the hierarchy
+        if parent_placement is None:
+            current_placement = obj.Placement
+        else:
+            current_placement = parent_placement.multiply(obj.Placement)
+
+        # 1. Prioritize BoundaryObject link
+        if hasattr(obj, "BoundaryObject") and obj.BoundaryObject and hasattr(obj.BoundaryObject.Shape, "BoundBox"):
+            bb = obj.BoundaryObject.Shape.BoundBox
+            # BoundaryObject placement is relative to its parent (obj)
+            abs_pos = current_placement.multiply(obj.BoundaryObject.Placement).Base
+            return FreeCAD.BoundBox(
+                bb.XMin + abs_pos.x, bb.YMin + abs_pos.y, bb.ZMin,
+                bb.XMax + abs_pos.x, bb.YMax + abs_pos.y, bb.ZMax
+            )
+
+        # 2. Check for raw Shape
+        if hasattr(obj, "Shape") and hasattr(obj.Shape, "BoundBox"):
+            bb = obj.Shape.BoundBox
+            abs_pos = current_placement.Base
+            return FreeCAD.BoundBox(
+                bb.XMin + abs_pos.x, bb.YMin + abs_pos.y, bb.ZMin,
+                bb.XMax + abs_pos.x, bb.YMax + abs_pos.y, bb.ZMax
+            )
+
+        # 3. Recurse into App::Part containers
+        if hasattr(obj, "Group"):
+            for child in obj.Group:
+                result = self._get_shape_bbox(child, current_placement)
+                if result:
+                    return result
+
+        # 4. Strictly no bounds: One-time debug warning
+        if obj.Name not in self.warned_missing_bounds:
+            FreeCAD.Console.PrintWarning(f"Manual Nester: Part '{obj.Label}' has no bounds (BoundaryObject or Shape) and will not participate in collisions.\n")
+            self.warned_missing_bounds.add(obj.Name)
+            
+        return None
+
+    def _get_obj_phys_info(self, obj):
+        """Returns (center_vector, width, height) in layout-global coordinates. Returns None if no bounds."""
+        bb = self._get_shape_bbox(obj)
+        if not bb:
+            return None
+            
+        center = FreeCAD.Vector((bb.XMin + bb.XMax) / 2.0, (bb.YMin + bb.YMax) / 2.0, 0)
+        return center, bb.XLength, bb.YLength
 
     def handle_release(self):
-        # ALWAYS ensure we finish/reset, regardless of implicit drag state
+        # In free-grab mode, mouse release does NOT place the part.
+        # The next left-click will handle placement via handle_click.
+        if self.is_free_grab:
+            self.is_mouse_down = False
+            return
+
+        # Clicked on a part without dragging — no-op (just deselect).
+        # Hold-to-drag is the only interaction for existing parts.
+        # Free-grab is reserved for master clones (set in handle_click).
+        if not self.is_implicit_drag and self.selected_obj:
+            self.finish_operation()
+            self.is_mouse_down = False
+            return
+
+        # Hold-and-drag release: place the part
         if self.is_implicit_drag:
             if self.selected_obj:
+                FreeCAD.Console.PrintMessage(f"Manual Nester: Ending drag, attempting to place {self.selected_obj.Label}...\n")
                 target_sheet_group = self._find_sheet_at_pos(self.selected_obj.Placement.Base)
                 if target_sheet_group:
                     shapes_group = next((c for c in target_sheet_group.Group if c.Label.startswith("Shapes_")), None)
                     if shapes_group:
-                        shapes_group.addObject(self.selected_obj)
+                        QtCore.QTimer.singleShot(0, lambda g=shapes_group.Name, o=self.selected_obj.Name: self._deferred_add_object_to_group(g, o))
+                        FreeCAD.Console.PrintMessage("Manual Nester: Deferred drop onto sheet.\n")
                 else:
                     if self.selected_obj in self.new_objects:
-                        self._revert_single_object(self.selected_obj)
-                        FreeCAD.Console.PrintMessage("Dropped outside sheet: clone removed.\n")
-        
+                        QtCore.QTimer.singleShot(0, lambda o=self.selected_obj.Name: self._deferred_revert_single_object(o))
+                        FreeCAD.Console.PrintMessage("Dropped outside sheet: clone implicitly scheduled for removal.\n")
+
         self.finish_operation()
         self.is_mouse_down = False
         self.is_implicit_drag = False
@@ -577,14 +736,32 @@ class ManualNesterToolObserver:
             FreeCAD.Console.PrintMessage(f"Constraint: {constraint}-Axis Locked.\n")
 
     def cancel_operation(self):
-        if self.selected_obj and hasattr(self, 'start_placement') and self.start_placement:
-             self.selected_obj.Placement = self.start_placement
-             FreeCAD.Console.PrintMessage("Operation Cancelled.\n")
+        if self.mode == "IDLE" and not self.is_free_grab:
+            return
+
+        try:
+            if self.selected_obj and hasattr(self, 'start_placement') and self.start_placement:
+                 try:
+                     self.selected_obj.Placement = self.start_placement
+                 except Exception:
+                     pass
+        except Exception:
+            pass
+             
+        FreeCAD.Console.PrintMessage("Operation Cancelled.\n")
         
         # M-009: Revert physics-displaced parts
-        for obj, placement in self.pre_drag_placements.items():
-            if obj and obj in self.layout_group.Document.Objects:
-                obj.Placement = placement
+        try:
+            if self.layout_group:
+                for obj, placement in list(self.pre_drag_placements.items()):
+                    try:
+                        _ = obj.Name  # Trigger ReferenceError if C++ obj is deleted
+                        obj.Placement = placement
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+            
         self.pre_drag_placements = {}
         
         self.mode = "IDLE"
@@ -593,8 +770,14 @@ class ManualNesterToolObserver:
         self.start_placement = None
         self.start_pos = None
         self.is_implicit_drag = False
+        self.is_free_grab = False
         self.is_mouse_down = False
-        self._hide_radius_indicator() # M-010
+        self.selected_obj = None
+        
+        try:
+            self._hide_radius_indicator() # M-010
+        except Exception:
+            pass
 
     def finish_operation(self):
         self.mode = "IDLE"
@@ -604,9 +787,17 @@ class ManualNesterToolObserver:
         self.start_placement = None
         self.start_pos = None
         self.is_implicit_drag = False
+        self.is_free_grab = False
+        self.is_mouse_down = False
         self.pre_drag_placements = {} # M-009: Clear pre-drag placements
-        self._hide_radius_indicator() # M-010
-        FreeCADGui.Selection.clearSelection() # Clear visual highlight
+        try:
+            self._hide_radius_indicator() # M-010
+        except Exception:
+            pass
+        try:
+            FreeCADGui.Selection.clearSelection() # Clear visual highlight
+        except Exception:
+            pass
 
     def pick_object(self, pos):
         """Helper to find the draggable object at screen pos."""
@@ -712,19 +903,33 @@ class ManualNesterToolObserver:
 
     def cancel(self):
         """Reverts any changes made to the object placements and removes new objects."""
+        if not self.layout_group:
+            return
+
         if self.original_placements:
             for obj, placement in self.original_placements.items():
-                if obj and obj in self.layout_group.Document.Objects: # Check if object still exists
-                    obj.Placement = placement
-        
-        # Remove new objects
+                try:
+                    if obj and obj.Name and obj in self.layout_group.Document.Objects:
+                        obj.Placement = placement
+                except Exception:
+                    pass  # Object may already be deleted
+
+        # Remove new objects and track deleted names to purge from tracking dicts
+        deleted_names = set()
         for obj in reversed(self.new_objects):
             try:
+                deleted_names.add(obj.Name)
+                
+                # PURGE from tracking dicts BEFORE deleting in C++
+                self.original_placements.pop(obj, None)
+                self.original_visibilities.pop(obj, None)
+                
                 self.layout_group.Document.removeObject(obj.Name)
             except Exception as e:
-                FreeCAD.Console.PrintWarning(f"[ManualNesterTool] Failed to remove object {obj.Name}: {e}\n")
-                pass
+                pass # Can't safely log getattr if object is already dead
+                
         self.new_objects = []
+
         FreeCAD.Console.PrintMessage("Manual Nester: Transformations cancelled and new items removed.\n")
 
     def _revert_single_object(self, obj):
@@ -744,49 +949,41 @@ class ManualNesterToolObserver:
 
     def cleanup(self):
         """Removes the event callbacks from the view and restores original visibilities."""
+        # Remove Coin3D radius indicator first
+        self._hide_radius_indicator()
+
         for event_type, callback_id in self.callback_ids:
             try:
                 self.view.removeEventCallback(event_type, callback_id)
             except Exception as e:
                 FreeCAD.Console.PrintWarning(f"Could not remove {event_type} callback: {e}\n")
         self.callback_ids = []
-        
+
         self.original_placements = {}
-        # Restore original visibility and selectability
-        for key, value in self.original_visibilities.items():
-            try:
-                if isinstance(key, str) and key.endswith("_selectable"):
-                    obj_name = key.replace("_selectable", "")
-                    # This is tricky because key might be an object or string
-                    # But in original_visibilities, keys are usually objects.
-                    pass 
-                
-                # Check if it was a selectability track
-                # Let's fix the tracking to use a more robust way
-                pass
-            except Exception as e:
-                FreeCAD.Console.PrintWarning(f"[ManualNesterTool] Visibility restoration failed: {e}\n")
-                pass
-        
-        # Simpler approach: find all sheets and make them selectable again
+
+        # Restore sheet boundary selectability
         if self.layout_group and hasattr(self.layout_group, "Group"):
             for sheet_group in self.layout_group.Group:
-                if sheet_group.Label.startswith("Sheet_"):
-                    boundary = next((obj for obj in sheet_group.Group if obj.Label.startswith("Sheet_Boundary_")), None)
-                    if boundary and hasattr(boundary, "ViewObject"):
-                        if hasattr(boundary.ViewObject, "Selectable"):
-                            boundary.ViewObject.Selectable = True
+                try:
+                    if sheet_group.Label.startswith("Sheet_"):
+                        boundary = next((obj for obj in sheet_group.Group if obj.Label.startswith("Sheet_Boundary_")), None)
+                        if boundary and hasattr(boundary, "ViewObject"):
+                            if hasattr(boundary.ViewObject, "Selectable"):
+                                boundary.ViewObject.Selectable = True
+                except Exception:
+                    pass
 
+        # Restore original visibilities — wrapped in try/except per object
+        # because cancel() may have already deleted some objects
         for obj, is_visible in self.original_visibilities.items():
             try:
-                if not isinstance(obj, str):
-                    if hasattr(obj, "ViewObject"):
+                if not isinstance(obj, str) and hasattr(obj, "Name") and obj.Name:
+                    if hasattr(obj, "ViewObject") and obj.ViewObject:
                         obj.ViewObject.Visibility = is_visible
-            except Exception as e:
-                FreeCAD.Console.PrintWarning(f"[ManualNesterTool] Object visibility restoration failed: {e}\n")
-                pass # Object may have been deleted
+            except Exception:
+                pass  # Object was already deleted at C++ level
         self.original_visibilities = {}
-        
+
         FreeCADGui.updateGui()
         self.layout_group = None
 
@@ -862,7 +1059,10 @@ class ManualNesterToolObserver:
     def _hide_radius_indicator(self):
         """M-010: Removes the radius indicator from the view."""
         if self.radius_indicator and self.view:
-            self.view.getSceneGraph().removeChild(self.radius_indicator)
+            try:
+                self.view.getSceneGraph().removeChild(self.radius_indicator)
+            except Exception:
+                pass  # Scene graph may already be torn down
             self.radius_indicator = None
 
     def _get_sheet_dimensions(self):
@@ -965,5 +1165,5 @@ class ManualNesterToolObserver:
         container.Placement = FreeCAD.Placement(self.start_pos, FreeCAD.Rotation())
         
         # Track for dragging
-        self._track_single_object(container)
+        self._track_single_object(container, None)
         return container
