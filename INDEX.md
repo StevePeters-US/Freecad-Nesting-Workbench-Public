@@ -57,7 +57,8 @@
 ### Core Package — Manual Nester
 | File | Layer | Key Classes |
 |------|-------|-------------|
-| `nestingworkbench/Tools/ManualNester/manual_nester_tool.py` | Tool | `ManualNesterTool` — mouse event handler |
+| `nestingworkbench/Tools/ManualNester/input_manager.py` | Tool | `InputManager` — Coin3D event dispatch + input state |
+| `nestingworkbench/Tools/ManualNester/manual_nester_tool.py` | Tool | `ManualNesterToolObserver` — action handlers, physics, placement |
 | `nestingworkbench/Tools/ManualNester/manual_nester_panel_manager.py` | Tool | Panel lifecycle |
 | `nestingworkbench/Tools/ManualNester/ui_manual_nester.py` | UI | Task panel with physics controls |
 | `nestingworkbench/Tools/ManualNester/physics_engine.py` | Tool | `PhysicsEngine` — proximity repulsion |
@@ -92,7 +93,8 @@
 | `LabelObject` | `datatypes/label_object.py` |
 | `Layout` | `Tools/Nesting/layout_manager.py` |
 | `LayoutManager` | `Tools/Nesting/layout_manager.py` |
-| `ManualNesterTool` | `Tools/ManualNester/manual_nester_tool.py` |
+| `InputManager` | `Tools/ManualNester/input_manager.py` |
+| `ManualNesterToolObserver` | `Tools/ManualNester/manual_nester_tool.py` |
 | `MinkowskiEngine` | `Tools/Nesting/algorithms/minkowski_engine.py` |
 | `Nester` | `Tools/Nesting/algorithms/nesting_strategy.py` |
 | `NestingController` | `Tools/Nesting/nesting_controller.py` |
@@ -118,6 +120,7 @@
 | Modify NFP/Minkowski/IFP computation | `nw_nfp_algorithm` |
 | Modify GA loop / fitness / crossover | `nw_genetic_algorithm` |
 | Modify manual nester / physics / drag | `nw_manual_nester` |
+| Modify input events / keybindings / actions | `nw_input_manager` |
 | Modify Shape, Sheet, or PlacedPart | `nw_shape_datatypes` |
 | Create or modify toolbar icons | `nw_icons` |
 | Write new task entries for any todo list | `nw_todo_format` |
@@ -140,5 +143,5 @@ All nesting runs use a temporary `Layout_temp_*` group. On commit it's renamed t
 ### FreeCAD Document Mutations
 Always check object validity before access. FreeCAD objects are reference-based — they can be deleted by other operations at any time. Use `try/except RuntimeError` for stale references.
 
-### Manual Nester Drag Pattern
-Mouse DOWN → hit-test + start tracking. Mouse MOVE → update placement + physics. Mouse UP → finalize placement. Free-grab mode: click to pick, move, click to place (for master clones).
+### Manual Nester Input Architecture
+`InputManager` owns Coin3D event callbacks and all transient input state (mode, constraints, drag detection, free-grab). It dispatches high-level actions (`click`, `move`, `release`, `cancel`, etc.) to handlers registered by `ManualNesterToolObserver`. The tool reads input state (e.g. `self.input.mode`) when computing movement vectors but never handles raw events directly.

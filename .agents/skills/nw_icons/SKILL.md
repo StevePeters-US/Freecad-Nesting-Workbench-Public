@@ -1,33 +1,54 @@
 ---
 name: NW Icon Design Guidelines
-description: Guidelines for creating custom icons for the Nesting Workbench (NW).
+description: Guidelines for creating custom SVG icons for the Nesting Workbench (NW).
 ---
 
 # NW Icon Design Guidelines
 
 > Read this before creating or modifying toolbar icons.
 
-When creating custom icons for the Nesting Workbench in FreeCAD, adhere to the following styling rules to ensure consistency across the UI. We embrace a quirky, literal, and illustrative style using real-world objects and visual metaphors rather than abstract geometry.
+When creating custom SVG icons for the Nesting Workbench in FreeCAD, adhere to the following strict styling rules to ensure consistency across the UI.
 
 ## File Format & Dimensions
 
 - **Format**: PNG (`.png`) - Raster graphics with transparency.
 - **Background**: Must be **transparent**.
-- **Dimensions**: Square viewport, designed to scale nicely to 64x64 or 32x32.
+- **Dimensions**: Strictly **64x64** pixels.
 
 ## Styling & Colors
 
-Our icons heavily feature **Teal Greens** (e.g., `#00a86b`) and **Purples** (e.g., `#9b5de5`), but retain the detailed, pixel-art/illustrative vibe of the original icons. Avoid flat, overly minimalist SVG outlines unless requested.
+All styling must be applied using inline SVG `style` attributes. Avoid classes or external stylesheets.
 
-## Existing Icon Metaphors
+### Base Colors
+- **Main Shape Fill**: Light gray `#e0e0e0`
+- **Secondary / Highlight Shape Fill**: White `#ffffff` or `none` depending on context.
+- **Default Stroke**: Black `#000000` with `stroke-width:2`
 
-Our existing styles convey the tool's meaning through highly recognizable, somewhat playful metaphors:
+### Nesting Workbench Specific Colors
+For tools related to nesting, packing, and boundaries:
+- **Primary Accent (Teal Green)**: `#00a86b` (Teal Green). Used to indicate primary shapes, parts being nested, or active tool elements. Apply to `fill` or `stroke` with `stroke-width:2`.
+- **Secondary Accent (Purple)**: `#9b5de5` (Purple). Used to denote sheets, boundaries, or container areas. Apply to `stroke` with `stroke-width:2` or `stroke-dasharray:4,4` for dashed guides.
 
-- **Run Nesting (`Nest_Icon.png`)**: A literal **bird's nest with eggs**. The nest represents the concept of "nesting" parts together securely.
-- **Create CAM Job (`CNC_Icon.png`)**: A **drill bit / endmill digging into a material block**. Represents the CNC milling process that results from the layout.
-- **Export Sheets (`DXF_Icon.png`)**: A **traditional printer outputting a document**. Represents exporting 2D DXF files for laser cutters or routers.
-- **Stack/Unstack Sheets (`Stack_Icon.png`)**: A **stack of pancakes with syrup and butter**. A playful take on the concept of "stacking" multiple 2D sheets on top of each other.
-- **Manual Nester (`Transform_Icon.png`)**: A **cartoon gloved hand**. Represents manually grabbing, moving, and interacting with placed parts.
+## Example Templates
+
+### General Tool Icon (e.g., General Part)
+```xml
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" version="1.1">
+    <rect width="50" height="50" x="7" y="7" style="fill:#ffffff;stroke:#000000;stroke-width:2"/>
+    <rect width="40" height="40" x="12" y="12" style="fill:#e0e0e0;stroke:#000000;stroke-width:1"/>
+</svg>
+```
+
+### Nesting Operation Icon (e.g., Nest Parts on Sheet)
+```xml
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" version="1.1">
+    <!-- Boundary / Sheet -->
+    <rect width="56" height="56" x="4" y="4" style="fill:none;stroke:#9b5de5;stroke-width:2;stroke-dasharray:4,4"/>
+    <!-- Nested Parts -->
+    <rect width="20" height="20" x="10" y="10" style="fill:#00a86b;stroke:#000000;stroke-width:2"/>
+    <path d="M 36 16 A 12 12 0 1 0 36 40 A 12 12 0 0 1 36 16 Z" style="fill:#00a86b;stroke:#000000;stroke-width:2"/>
+</svg>
+```
 
 ## Directory
-All custom NW icons should be saved to `Resources/icons/` relative to the project root in `.png` format.
+All custom NW icons should be saved to `Resources/icons/` relative to the project root. Keep shapes simple and recognizable at 16x16 (FreeCAD toolbar size).

@@ -81,14 +81,13 @@ Freecad-Nesting-Workbench/
 │           └── transform_panel_manager.py  # TransformTaskPanel
 │
 ├── Resources/
-│   └── icons/                          # SVG/PNG toolbar icons
-│       ├── Nesting_Workbench.svg
-│       ├── Nest_Icon.png
+│   └── icons/                          # PNG toolbar icons
 │       ├── CNC_Icon.png
 │       ├── DXF_Icon.png
+│       ├── Nest_Icon.png
+│       ├── Nesting_Workbench.png
+│       ├── Silhouette_Icon.png
 │       ├── Stack_Icon.png
-│       ├── Silhouette_Icon.svg
-│       ├── Nesting_Transform.svg
 │       └── Transform_Icon.png
 │
 └── fonts/                              # Bundled label fonts
@@ -114,11 +113,10 @@ Freecad-Nesting-Workbench/
 
 ### Nesting Menu / Toolbar
 
-| Icon | Command Name | Internal Name | Description |
-|------|-------------|---------------|-------------|
+| Nesting_Workbench.png | Workbench | N/A | Main toolbar icon |
 | Nest_Icon.png | Run Nesting | `Nesting_Run` | Opens the main nesting task panel |
 | CNC_Icon.png | Create CAM Job | `Nesting_CreateCAMJob` | Creates a CAM job from the selected layout |
-| Silhouette_Icon.svg | Create Silhouette | `Nesting_CreateSilhouette` | Generates 2D outlines from selected 3D objects |
+| Silhouette_Icon.png | Create Silhouette | `Nesting_CreateSilhouette` | Generates 2D outlines from selected 3D objects |
 | DXF_Icon.png | Export Sheets | `Nesting_Export` | Exports each sheet to a DXF file |
 | Stack_Icon.png | Stack/Unstack Sheets | `Nesting_StackSheets` | Toggles stacking of sheets at origin |
 | Transform_Icon.png | Transform Parts | `Nesting_TransformParts` | Manual drag‑and‑drop to move/rotate placed parts |

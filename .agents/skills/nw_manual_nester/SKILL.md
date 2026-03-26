@@ -4,7 +4,8 @@
 
 ## Files to Read First
 
-- `nestingworkbench/Tools/ManualNester/manual_nester_tool.py` — main observer
+- `nestingworkbench/Tools/ManualNester/manual_nester_tool.py` — main observer + action handlers
+- `nestingworkbench/Tools/ManualNester/input_manager.py` — input event dispatch + state
 - `nestingworkbench/Tools/ManualNester/physics_engine.py` — proximity repulsion
 - `nestingworkbench/Tools/ManualNester/collision_resolver.py` — overlap resolution
 - `nestingworkbench/Tools/ManualNester/ui_manual_nester.py` — task panel
@@ -13,12 +14,15 @@
 
 ```
 ManualNester/
-├── manual_nester_tool.py      ← mouse event handler (Coin3D observer)
+├── input_manager.py           ← Coin3D event dispatch + input state machine
+├── manual_nester_tool.py      ← action handlers, physics, placement logic
 ├── manual_nester_panel_manager.py ← panel lifecycle
 ├── ui_manual_nester.py        ← Qt task panel with physics controls
 ├── physics_engine.py          ← repulsion + falloff computation
 └── collision_resolver.py      ← BoundBox overlap resolution
 ```
+
+> For input event details, see skill **nw_input_manager**.
 
 ## Control Scheme (Blender-inspired)
 

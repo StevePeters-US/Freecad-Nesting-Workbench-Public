@@ -44,7 +44,7 @@ class NestingWorkbench(FreeCADGui.Workbench):
     """
     MenuText = "Nesting"
     ToolTip = "A workbench for 2D nesting of shapes."
-    Icon = "Nesting_Workbench.svg"
+    Icon = "Nesting_Workbench.png"
 
     def GetClassName(self):
         return "Gui::PythonWorkbench"
