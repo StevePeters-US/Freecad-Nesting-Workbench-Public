@@ -7,43 +7,37 @@ class CollisionResolver:
     def clamp_to_sheet(self, obj, sheet_bbox):
         """
         Adjusts obj.Placement.Base so obj's BoundBox stays within sheet_bbox.
+        Uses rotation-aware bounding box computation.
         """
-        bb, ox, oy = self._find_bbox(obj)
-        if not bb:
+        abs_bb = self._get_abs_bbox(obj)
+        if not abs_bb:
             return False
-            
+
         current_pos = obj.Placement.Base
-        
-        # Absolute min/max includes object placement + accumulated internal offset + bb local bounds
-        obj_min_x = current_pos.x + ox + bb.XMin
-        obj_max_x = current_pos.x + ox + bb.XMax
-        obj_min_y = current_pos.y + oy + bb.YMin
-        obj_max_y = current_pos.y + oy + bb.YMax
-        
+
         new_x = current_pos.x
         new_y = current_pos.y
         clamped = False
-        
+
         # Check X boundaries
-        if obj_min_x < sheet_bbox.XMin:
-            new_x += (sheet_bbox.XMin - obj_min_x)
+        if abs_bb['min_x'] < sheet_bbox.XMin:
+            new_x += (sheet_bbox.XMin - abs_bb['min_x'])
             clamped = True
-        elif obj_max_x > sheet_bbox.XMax:
-            new_x -= (obj_max_x - sheet_bbox.XMax)
+        elif abs_bb['max_x'] > sheet_bbox.XMax:
+            new_x -= (abs_bb['max_x'] - sheet_bbox.XMax)
             clamped = True
-            
+
         # Check Y boundaries
-        if obj_min_y < sheet_bbox.YMin:
-            new_y += (sheet_bbox.YMin - obj_min_y)
+        if abs_bb['min_y'] < sheet_bbox.YMin:
+            new_y += (sheet_bbox.YMin - abs_bb['min_y'])
             clamped = True
-        elif obj_max_y > sheet_bbox.YMax:
-            new_y -= (obj_max_y - sheet_bbox.YMax)
+        elif abs_bb['max_y'] > sheet_bbox.YMax:
+            new_y -= (abs_bb['max_y'] - sheet_bbox.YMax)
             clamped = True
-            
+
         if clamped:
-            # Recreate vector using the same type as current_pos to avoid FreeCAD dependency here
             obj.Placement.Base = type(current_pos)(new_x, new_y, current_pos.z)
-            
+
         return clamped
 
     def separate_overlapping(self, moved_obj, other_objs, max_iterations=5):
@@ -119,43 +113,77 @@ class CollisionResolver:
         return False
 
     def _get_abs_bbox(self, obj):
-        """Helper to get absolute bounding box as a dict. Returns None if no bounds found."""
-        bb, ox, oy = self._find_bbox(obj)
+        """Helper to get absolute bounding box as a dict.
+
+        Transforms the local BoundBox through the full placement chain
+        (including rotation) so that the axis-aligned result is correct
+        for rotated parts.  Returns None if no bounds found.
+        """
+        placement, bb = self._find_bbox_with_placement(obj, None)
         if not bb:
             return None
-        pos = obj.Placement.Base
-        gx = pos.x + ox
-        gy = pos.y + oy
+        transformed = self._transform_bbox(bb, placement)
         return {
-            'min_x': gx + bb.XMin,
-            'max_x': gx + bb.XMax,
-            'min_y': gy + bb.YMin,
-            'max_y': gy + bb.YMax,
-            'center_x': gx + bb.XMin + bb.XLength / 2,
-            'center_y': gy + bb.YMin + bb.YLength / 2
+            'min_x': transformed[0],
+            'max_x': transformed[1],
+            'min_y': transformed[2],
+            'max_y': transformed[3],
+            'center_x': (transformed[0] + transformed[1]) / 2,
+            'center_y': (transformed[2] + transformed[3]) / 2,
         }
 
-    def _find_bbox(self, obj):
-        """Returns (BoundBox, offset_x, offset_y) relative to local origin of 'obj'."""
+    def _find_bbox_with_placement(self, obj, parent_placement):
+        """Returns (accumulated_placement, local_BoundBox) or (None, None).
+
+        Walks BoundaryObject → Shape → Group children, accumulating
+        placements so the caller can apply the full transform.
+        """
+        if parent_placement is None:
+            current = obj.Placement
+        else:
+            current = parent_placement.multiply(obj.Placement)
+
         # 1. Prioritize BoundaryObject link
         if hasattr(obj, "BoundaryObject") and obj.BoundaryObject and hasattr(obj.BoundaryObject.Shape, "BoundBox"):
-            bb = obj.BoundaryObject.Shape.BoundBox
-            pos = obj.BoundaryObject.Placement.Base
-            return bb, pos.x, pos.y
-            
+            full = current.multiply(obj.BoundaryObject.Placement)
+            return full, obj.BoundaryObject.Shape.BoundBox
+
         # 2. Check for raw Shape
         if hasattr(obj, "Shape") and hasattr(obj.Shape, "BoundBox"):
-            return obj.Shape.BoundBox, 0, 0
-            
+            return current, obj.Shape.BoundBox
+
         # 3. Recurse into App::Part containers
         if hasattr(obj, "Group"):
             for child in obj.Group:
-                bb, ox, oy = self._find_bbox(child)
-                if bb:
-                    # accumulation: child's placement + internal child offset
-                    cpos = child.Placement.Base
-                    return bb, ox + cpos.x, oy + cpos.y
-        return None, 0, 0
+                result_placement, result_bb = self._find_bbox_with_placement(child, current)
+                if result_bb:
+                    return result_placement, result_bb
+
+        return None, None
+
+    @staticmethod
+    def _transform_bbox(bb, placement):
+        """Transform 4 local BoundBox corners (XY plane) through *placement*
+        and return (min_x, max_x, min_y, max_y)."""
+        try:
+            corners = [
+                placement.multVec(type(placement.Base)(bb.XMin, bb.YMin, 0)),
+                placement.multVec(type(placement.Base)(bb.XMax, bb.YMin, 0)),
+                placement.multVec(type(placement.Base)(bb.XMin, bb.YMax, 0)),
+                placement.multVec(type(placement.Base)(bb.XMax, bb.YMax, 0)),
+            ]
+        except Exception:
+            # Fallback: FreeCAD.Vector not available (unit tests)
+            import FreeCAD
+            corners = [
+                placement.multVec(FreeCAD.Vector(bb.XMin, bb.YMin, 0)),
+                placement.multVec(FreeCAD.Vector(bb.XMax, bb.YMin, 0)),
+                placement.multVec(FreeCAD.Vector(bb.XMin, bb.YMax, 0)),
+                placement.multVec(FreeCAD.Vector(bb.XMax, bb.YMax, 0)),
+            ]
+        xs = [v.x for v in corners]
+        ys = [v.y for v in corners]
+        return (min(xs), max(xs), min(ys), max(ys))
 
     def _bboxes_intersect(self, bb1, bb2):
         """Check if two absolute bboxes (dicts) intersect."""

@@ -367,7 +367,8 @@ class ManualNesterToolObserver:
         # Hold-to-drag is the only interaction for existing parts.
         # Free-grab is reserved for master clones (set in handle_click).
         if not self.input.is_implicit_drag and self.selected_obj:
-            self.finish_operation()
+            # Defer finish to avoid modifying Coin3D scene graph inside callback
+            QtCore.QTimer.singleShot(0, self.finish_operation)
             self.input.is_mouse_down = False
             return
 
@@ -386,7 +387,9 @@ class ManualNesterToolObserver:
                         QtCore.QTimer.singleShot(0, lambda o=self.selected_obj.Name: self._deferred_revert_single_object(o))
                         FreeCAD.Console.PrintMessage("Dropped outside sheet: clone implicitly scheduled for removal.\n")
 
-        self.finish_operation()
+        # Defer finish_operation to avoid modifying Coin3D scene graph
+        # (radius indicator removal) inside its own event callback.
+        QtCore.QTimer.singleShot(0, self.finish_operation)
         self.input.is_mouse_down = False
         self.input.is_implicit_drag = False
 
@@ -543,7 +546,12 @@ class ManualNesterToolObserver:
             if not any_moved: break
 
     def _get_shape_bbox(self, obj, parent_placement=None):
-        """Returns the global BoundBox for an object, prioritizing BoundaryObject."""
+        """Returns the global BoundBox for an object, prioritizing BoundaryObject.
+
+        Transforms local BoundBox corners through the full placement (including
+        rotation) so that the returned axis-aligned BoundBox is correct even for
+        rotated parts.
+        """
         # Accumulate placement through the hierarchy
         if parent_placement is None:
             current_placement = obj.Placement
@@ -554,20 +562,13 @@ class ManualNesterToolObserver:
         if hasattr(obj, "BoundaryObject") and obj.BoundaryObject and hasattr(obj.BoundaryObject.Shape, "BoundBox"):
             bb = obj.BoundaryObject.Shape.BoundBox
             # BoundaryObject placement is relative to its parent (obj)
-            abs_pos = current_placement.multiply(obj.BoundaryObject.Placement).Base
-            return FreeCAD.BoundBox(
-                bb.XMin + abs_pos.x, bb.YMin + abs_pos.y, bb.ZMin,
-                bb.XMax + abs_pos.x, bb.YMax + abs_pos.y, bb.ZMax
-            )
+            full_placement = current_placement.multiply(obj.BoundaryObject.Placement)
+            return self._transform_bbox(bb, full_placement)
 
         # 2. Check for raw Shape
         if hasattr(obj, "Shape") and hasattr(obj.Shape, "BoundBox"):
             bb = obj.Shape.BoundBox
-            abs_pos = current_placement.Base
-            return FreeCAD.BoundBox(
-                bb.XMin + abs_pos.x, bb.YMin + abs_pos.y, bb.ZMin,
-                bb.XMax + abs_pos.x, bb.YMax + abs_pos.y, bb.ZMax
-            )
+            return self._transform_bbox(bb, current_placement)
 
         # 3. Recurse into App::Part containers
         if hasattr(obj, "Group"):
@@ -582,6 +583,27 @@ class ManualNesterToolObserver:
             self.warned_missing_bounds.add(obj.Name)
 
         return None
+
+    @staticmethod
+    def _transform_bbox(bb, placement):
+        """Transform 8 local BoundBox corners through *placement* and return
+        the axis-aligned BoundBox that encloses them."""
+        corners = [
+            FreeCAD.Vector(bb.XMin, bb.YMin, bb.ZMin),
+            FreeCAD.Vector(bb.XMax, bb.YMin, bb.ZMin),
+            FreeCAD.Vector(bb.XMin, bb.YMax, bb.ZMin),
+            FreeCAD.Vector(bb.XMax, bb.YMax, bb.ZMin),
+            FreeCAD.Vector(bb.XMin, bb.YMin, bb.ZMax),
+            FreeCAD.Vector(bb.XMax, bb.YMin, bb.ZMax),
+            FreeCAD.Vector(bb.XMin, bb.YMax, bb.ZMax),
+            FreeCAD.Vector(bb.XMax, bb.YMax, bb.ZMax),
+        ]
+        transformed = [placement.multVec(c) for c in corners]
+        xs = [v.x for v in transformed]
+        ys = [v.y for v in transformed]
+        zs = [v.z for v in transformed]
+        return FreeCAD.BoundBox(min(xs), min(ys), min(zs),
+                                max(xs), max(ys), max(zs))
 
     def _get_obj_phys_info(self, obj):
         """Returns (center_vector, width, height) in layout-global coordinates. Returns None if no bounds."""
@@ -631,10 +653,8 @@ class ManualNesterToolObserver:
         self.start_pos = None
         self.selected_obj = None
 
-        try:
-            self._hide_radius_indicator() # M-010
-        except Exception:
-            pass
+        # Defer scene graph modification to avoid Coin3D crash inside callback
+        QtCore.QTimer.singleShot(0, self._hide_radius_indicator)
 
     def finish_operation(self):
         self.input.finish()
