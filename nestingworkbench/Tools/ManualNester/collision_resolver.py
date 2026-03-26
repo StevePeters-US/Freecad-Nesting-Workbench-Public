@@ -1,7 +1,23 @@
 """
 Collision resolver for the manual nesting tool.
 Handles clamping parts to sheet boundaries and basic overlap resolution.
+
+NOTE: FreeCAD's ``obj.Placement`` returns a **copy**.  Assigning to
+``obj.Placement.Base`` silently modifies that copy, leaving the real
+object untouched.  Every mutation therefore uses the pattern::
+
+    pl = obj.Placement
+    pl.Base = new_value
+    obj.Placement = pl          # <-- writes back to the property
 """
+
+
+def _set_base(obj, new_base):
+    """Safely set an object's Placement.Base via full Placement assignment."""
+    pl = obj.Placement
+    pl.Base = new_base
+    obj.Placement = pl
+
 
 class CollisionResolver:
     def clamp_to_sheet(self, obj, sheet_bbox):
@@ -36,7 +52,7 @@ class CollisionResolver:
             clamped = True
 
         if clamped:
-            obj.Placement.Base = type(current_pos)(new_x, new_y, current_pos.z)
+            _set_base(obj, type(current_pos)(new_x, new_y, current_pos.z))
 
         return clamped
 
@@ -51,24 +67,24 @@ class CollisionResolver:
             if not moved_bb:
                 return False
             current_pos = moved_obj.Placement.Base
-            
+
             for other in other_objs:
                 if other == moved_obj:
                     continue
-                
+
                 other_bb = self._get_abs_bbox(other)
                 if not other_bb:
                     continue
-                
+
                 if self._bboxes_intersect(moved_bb, other_bb):
                     any_overlap = True
                     # Calculate separation (XY only)
                     overlap_x = min(moved_bb['max_x'], other_bb['max_x']) - max(moved_bb['min_x'], other_bb['min_x']) + 0.001
                     overlap_y = min(moved_bb['max_y'], other_bb['max_y']) - max(moved_bb['min_y'], other_bb['min_y']) + 0.001
-                    
+
                     new_x = current_pos.x
                     new_y = current_pos.y
-                    
+
                     if overlap_x < overlap_y:
                         # Push along X
                         dir_x = 1.0 if moved_bb['center_x'] > other_bb['center_x'] else -1.0
@@ -77,11 +93,11 @@ class CollisionResolver:
                         # Push along Y
                         dir_y = 1.0 if moved_bb['center_y'] > other_bb['center_y'] else -1.0
                         new_y += overlap_y * dir_y
-                    
+
                     current_pos = type(current_pos)(new_x, new_y, current_pos.z)
-                    moved_obj.Placement.Base = current_pos
+                    _set_base(moved_obj, current_pos)
                     moved_bb = self._get_abs_bbox(moved_obj)
-            
+
             if not any_overlap:
                 return True
         return False
@@ -92,23 +108,23 @@ class CollisionResolver:
         bb_b = self._get_abs_bbox(obj_b)
         if not bb_a or not bb_b:
             return False
-            
+
         if self._bboxes_intersect(bb_a, bb_b):
             ox = min(bb_a['max_x'], bb_b['max_x']) - max(bb_a['min_x'], bb_b['min_x']) + 0.001
             oy = min(bb_a['max_y'], bb_b['max_y']) - max(bb_a['min_y'], bb_b['min_y']) + 0.001
-            
+
             if ox < oy:
                 shift = ox / 2.0
                 dir_x = 1.0 if bb_a['center_x'] > bb_b['center_x'] else -1.0
-                # Must use explicit assignment — Placement.Base returns a copy,
-                # so += modifies the copy without setting it back via the property setter.
-                obj_a.Placement.Base = obj_a.Placement.Base + type(obj_a.Placement.Base)(shift * dir_x, 0, 0)
-                obj_b.Placement.Base = obj_b.Placement.Base + type(obj_b.Placement.Base)(-shift * dir_x, 0, 0)
+                Vec = type(obj_a.Placement.Base)
+                _set_base(obj_a, obj_a.Placement.Base + Vec(shift * dir_x, 0, 0))
+                _set_base(obj_b, obj_b.Placement.Base + Vec(-shift * dir_x, 0, 0))
             else:
                 shift = oy / 2.0
                 dir_y = 1.0 if bb_a['center_y'] > bb_b['center_y'] else -1.0
-                obj_a.Placement.Base = obj_a.Placement.Base + type(obj_a.Placement.Base)(0, shift * dir_y, 0)
-                obj_b.Placement.Base = obj_b.Placement.Base + type(obj_b.Placement.Base)(0, -shift * dir_y, 0)
+                Vec = type(obj_a.Placement.Base)
+                _set_base(obj_a, obj_a.Placement.Base + Vec(0, shift * dir_y, 0))
+                _set_base(obj_b, obj_b.Placement.Base + Vec(0, -shift * dir_y, 0))
             return True
         return False
 
@@ -135,7 +151,7 @@ class CollisionResolver:
     def _find_bbox_with_placement(self, obj, parent_placement):
         """Returns (accumulated_placement, local_BoundBox) or (None, None).
 
-        Walks BoundaryObject → Shape → Group children, accumulating
+        Walks BoundaryObject -> Shape -> Group children, accumulating
         placements so the caller can apply the full transform.
         """
         if parent_placement is None:
@@ -189,7 +205,7 @@ class CollisionResolver:
         """Check if two absolute bboxes (dicts) intersect."""
         # Use strict inequality for intersection:
         # If one ends exactly where the next starts, it's not an intersection.
-        return not (bb1['max_x'] <= bb2['min_x'] or 
-                   bb1['min_x'] >= bb2['max_x'] or 
-                   bb1['max_y'] <= bb2['min_y'] or 
+        return not (bb1['max_x'] <= bb2['min_x'] or
+                   bb1['min_x'] >= bb2['max_x'] or
+                   bb1['max_y'] <= bb2['min_y'] or
                    bb1['min_y'] >= bb2['max_y'])

@@ -322,9 +322,10 @@ class ManualNesterToolObserver:
             if drag_delta.Length > 0.001:
                 self._apply_physics(drag_delta)
 
-            # M-010: Show radius indicator
+            # M-010: Show radius indicator at the part's ACTUAL position
+            # (may differ from new_pos if clamping moved it)
             if self.physics_enabled:
-                self._show_radius_indicator(new_pos, self.physics_engine.radius)
+                self._show_radius_indicator(self.selected_obj.Placement.Base, self.physics_engine.radius)
             else:
                 self._hide_radius_indicator()
 
@@ -497,7 +498,9 @@ class ManualNesterToolObserver:
                 if obj not in self.pre_drag_placements:
                     self.pre_drag_placements[obj] = obj.Placement.copy()
 
-                obj.Placement.Base = obj.Placement.Base + displacement
+                pl = obj.Placement
+                pl.Base = pl.Base + displacement
+                obj.Placement = pl
                 displaced_objs.append(obj)
 
         # 2. Clamp the DRAGGED part to its sheet boundary
