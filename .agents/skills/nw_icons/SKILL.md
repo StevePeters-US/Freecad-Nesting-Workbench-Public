@@ -1,59 +1,54 @@
-# Skill: Icon Design Guidelines
+---
+name: NW Icon Design Guidelines
+description: Guidelines for creating custom SVG icons for the Nesting Workbench (NW).
+---
+
+# NW Icon Design Guidelines
 
 > Read this before creating or modifying toolbar icons.
 
-## Location
+When creating custom SVG icons for the Nesting Workbench in FreeCAD, adhere to the following strict styling rules to ensure consistency across the UI.
 
-All icons live in `Resources/icons/` relative to the project root.
+## File Format & Dimensions
 
-## Current Icons
+- **Format**: SVG (`<svg xmlns="http://www.w3.org/2000/svg" ...>`)
+- **Dimensions**: Viewport size strictly `width="64" height="64"`.
+- **Version**: `version="1.1"`
 
-| File | Format | Used by |
-|------|--------|---------|
-| `Nesting_Workbench.svg` | SVG | Workbench icon in FreeCAD toolbar |
-| `Nest_Icon.png` | PNG | Run Nesting command |
-| `CNC_Icon.png` | PNG | Create CAM Job command |
-| `DXF_Icon.png` | PNG | Export Sheets command |
-| `Stack_Icon.png` | PNG | Stack/Unstack Sheets command |
-| `Silhouette_Icon.svg` | SVG | Create Silhouette command |
-| `Nesting_Transform.svg` | SVG | Manual Nester command |
-| `Transform_Icon.png` | PNG | Manual Nester (alternate) |
+## Styling & Colors
 
-## New Icon Format (SVG preferred)
+All styling must be applied using inline SVG `style` attributes. Avoid classes or external stylesheets.
 
-For new icons, use SVG with these specifications:
+### Base Colors
+- **Main Shape Fill**: Light gray `#e0e0e0`
+- **Secondary / Highlight Shape Fill**: White `#ffffff` or `none` depending on context.
+- **Default Stroke**: Black `#000000` with `stroke-width:2`
 
+### Nesting Workbench Specific Colors
+For tools related to nesting, packing, and boundaries:
+- **Primary Accent (Teal Green)**: `#00a86b` (Teal Green). Used to indicate primary shapes, parts being nested, or active tool elements. Apply to `fill` or `stroke` with `stroke-width:2`.
+- **Secondary Accent (Purple)**: `#9b5de5` (Purple). Used to denote sheets, boundaries, or container areas. Apply to `stroke` with `stroke-width:2` or `stroke-dasharray:4,4` for dashed guides.
+
+## Example Templates
+
+### General Tool Icon (e.g., General Part)
 ```xml
-<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="64" height="64" viewBox="0 0 64 64">
-  <!-- icon content -->
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" version="1.1">
+    <rect width="50" height="50" x="7" y="7" style="fill:#ffffff;stroke:#000000;stroke-width:2"/>
+    <rect width="40" height="40" x="12" y="12" style="fill:#e0e0e0;stroke:#000000;stroke-width:1"/>
 </svg>
 ```
 
-### Colors
-
-| Role | Color | Usage |
-|------|-------|-------|
-| Main fill | `#e0e0e0` (light gray) | Primary shape fill |
-| Secondary | `#ffffff` or `none` | Highlights or transparent |
-| Stroke | `#000000` | Outlines, `stroke-width: 2` |
-| Accent | `#4a90d9` (blue) | Nesting-specific elements |
-| Warning/optional | `#ffaa00` (orange) | Optional features, GPU |
-
-### Rules
-
-- Use **inline styles** only — no external stylesheets
-- Canvas is 64x64 pixels
-- Keep shapes simple and recognizable at 16x16 (FreeCAD toolbar size)
-- Use `stroke-width: 2` for outlines
-- Test visibility at both 64px and 16px scales
-- Save source `.xcf` (GIMP) files alongside PNGs when applicable
-
-### Template — General Tool
-
+### Nesting Operation Icon (e.g., Nest Parts on Sheet)
 ```xml
-<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="64" height="64" viewBox="0 0 64 64">
-  <rect x="8" y="8" width="48" height="48" rx="4"
-        style="fill:#e0e0e0; stroke:#000000; stroke-width:2"/>
-  <!-- Add tool-specific elements here -->
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" version="1.1">
+    <!-- Boundary / Sheet -->
+    <rect width="56" height="56" x="4" y="4" style="fill:none;stroke:#9b5de5;stroke-width:2;stroke-dasharray:4,4"/>
+    <!-- Nested Parts -->
+    <rect width="20" height="20" x="10" y="10" style="fill:#00a86b;stroke:#000000;stroke-width:2"/>
+    <path d="M 36 16 A 12 12 0 1 0 36 40 A 12 12 0 0 1 36 16 Z" style="fill:#00a86b;stroke:#000000;stroke-width:2"/>
 </svg>
 ```
+
+## Directory
+All custom NW icons should be saved to `Resources/icons/` relative to the project root. Keep shapes simple and recognizable at 16x16 (FreeCAD toolbar size).

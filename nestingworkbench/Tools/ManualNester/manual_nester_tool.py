@@ -578,18 +578,35 @@ class ManualNesterToolObserver:
                 obj.Placement.Base = obj.Placement.Base + displacement
                 displaced_objs.append(obj)
 
-        # 2. Iteratively resolve all collisions in the layout to create chain reaction (Relaxation)
+        # 2. Clamp the DRAGGED part to its sheet boundary
+        dragged_sheet = self.obj_to_sheet.get(self.selected_obj)
+        if dragged_sheet:
+            boundary = next((c for c in dragged_sheet.Group if c.Label.startswith("Sheet_Boundary_")), None)
+            if boundary and hasattr(boundary, "Shape") and hasattr(boundary.Shape, "BoundBox"):
+                s_bb = boundary.Shape.BoundBox
+                s_pos = boundary.Placement.Base
+                global_sheet_bb = FreeCAD.BoundBox(
+                    s_bb.XMin + s_pos.x, s_bb.YMin + s_pos.y, s_bb.ZMin,
+                    s_bb.XMax + s_pos.x, s_bb.YMax + s_pos.y, s_bb.ZMax
+                )
+                self.collision_resolver.clamp_to_sheet(self.selected_obj, global_sheet_bb)
+
+        # 3. Iteratively resolve all collisions in the layout to create chain reaction (Relaxation)
         all_tracked = [o for o in self.original_placements if o != self.selected_obj]
-        
+
         for _ in range(3):
             any_moved = False
+
+            # A. Resolve overlaps between dragged part and others (dragged part stays, others move)
+            for obj in all_tracked:
+                self.collision_resolver.separate_overlapping(obj, [self.selected_obj])
+
             for i, obj in enumerate(all_tracked):
-                # A. Clamp to its persistent sheet (GLOBAL COORDS)
+                # B. Clamp to its persistent sheet (GLOBAL COORDS)
                 sheet_group = self.obj_to_sheet.get(obj)
                 if sheet_group:
                     boundary = next((c for c in sheet_group.Group if c.Label.startswith("Sheet_Boundary_")), None)
                     if boundary and hasattr(boundary, "Shape") and hasattr(boundary.Shape, "BoundBox"):
-                        # Calculate Global Sheet BBox
                         s_bb = boundary.Shape.BoundBox
                         s_pos = boundary.Placement.Base
                         global_sheet_bb = FreeCAD.BoundBox(
@@ -598,12 +615,12 @@ class ManualNesterToolObserver:
                         )
                         if self.collision_resolver.clamp_to_sheet(obj, global_sheet_bb):
                              any_moved = True
-                
-                # B. Separate from neighbors (Symmetric push)
+
+                # C. Separate from neighbors (Symmetric push)
                 for other in all_tracked[i+1:]:
                     if self.collision_resolver.resolve_bi_collision(obj, other):
                         any_moved = True
-            
+
             if not any_moved: break
 
     def _get_shape_bbox(self, obj, parent_placement=None):
