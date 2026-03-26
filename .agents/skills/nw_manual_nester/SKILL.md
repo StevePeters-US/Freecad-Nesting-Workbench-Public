@@ -1,0 +1,64 @@
+# Skill: Manual Nester
+
+> Read this before modifying the manual drag/drop tool, physics, or collision resolution.
+
+## Files to Read First
+
+- `nestingworkbench/Tools/ManualNester/manual_nester_tool.py` — main observer
+- `nestingworkbench/Tools/ManualNester/physics_engine.py` — proximity repulsion
+- `nestingworkbench/Tools/ManualNester/collision_resolver.py` — overlap resolution
+- `nestingworkbench/Tools/ManualNester/ui_manual_nester.py` — task panel
+
+## Architecture
+
+```
+ManualNester/
+├── manual_nester_tool.py      ← mouse event handler (Coin3D observer)
+├── manual_nester_panel_manager.py ← panel lifecycle
+├── ui_manual_nester.py        ← Qt task panel with physics controls
+├── physics_engine.py          ← repulsion + falloff computation
+└── collision_resolver.py      ← BoundBox overlap resolution
+```
+
+## Control Scheme (Blender-inspired)
+
+| Key | Action |
+|-----|--------|
+| **G** | Grab/translate selected part |
+| **R** | Rotate selected part |
+| **Shift+X** | Constrain to X-axis |
+| **Shift+Y** | Constrain to Y-axis |
+| **L-Click / Enter** | Confirm placement |
+| **Esc / R-Click** | Cancel / revert |
+| **Ctrl (hold)** | Snap (45deg rotation, grid translation) |
+
+## Drag Modes
+
+1. **Hold-to-drag** — Mouse DOWN on existing part, drag, release to place
+2. **Free-grab** — Click master shape to clone, move freely, click to place (M-B07)
+
+## Physics Engine
+
+- Operates on FreeCAD `Placement.Base` vectors (no Shapely dependency)
+- Uses `BoundBox` for broad-phase collision detection
+- Falloff: `strength = max(0, 1 - (distance / radius) ^ curve_exponent)`
+- Runs synchronously in `handle_move()` — no threads
+- Parts clamped to sheet boundary after displacement
+
+## Known Bugs (see `todo_manual.md` Tier 0)
+
+| Bug | Issue |
+|-----|-------|
+| M-B01 | Scroll wheel handler is dead code |
+| M-B02 | Access violation on right-click when idle |
+| M-B03 | `_get_obj_center()` crashes on App::Part |
+| M-B04 | Physics pushes in drag direction (should repulse) |
+| M-B05 | Never calls `separate_overlapping()` |
+| M-B06 | `_get_abs_bbox()` crashes on App::Part |
+
+## Gotchas
+
+- FreeCAD `Placement.Base` returns a copy — `+= vec` won't persist. Use `= base + vec` (M-B09)
+- Modifying Coin3D scene graph from event callbacks causes access violations — defer via `QTimer.singleShot(0, fn)` (M-B11)
+- `FreeCADGui.Selection.clearSelection()` can crash if called inside event callback
+- App::Part containers don't have `.Shape` — must walk into children
