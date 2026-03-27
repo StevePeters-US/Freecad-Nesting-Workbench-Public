@@ -6,6 +6,7 @@ layout parameters spreadsheet in FreeCAD.
 """
 
 import FreeCAD
+from ...constants import *
 
 def create_layout_spreadsheet(doc, group, ui_params, sheet_efficiencies=None):
     """
@@ -26,15 +27,15 @@ def create_layout_spreadsheet(doc, group, ui_params, sheet_efficiencies=None):
     sheet_data = doc.addObject("Spreadsheet::Sheet", "LayoutParameters")
     sheet_data.set('A1', 'Parameter')
     sheet_data.set('B1', 'Value')
-    sheet_data.set('A2', 'SheetWidth')
+    sheet_data.set('A2', PROP_SHEET_WIDTH)
     sheet_data.set('B2', str(ui_params.get('sheet_width', 0)))
-    sheet_data.set('A3', 'SheetHeight')
+    sheet_data.set('A3', PROP_SHEET_HEIGHT)
     sheet_data.set('B3', str(ui_params.get('sheet_height', 0)))
-    sheet_data.set('A4', 'PartSpacing')
+    sheet_data.set('A4', PROP_PART_SPACING)
     sheet_data.set('B4', str(ui_params.get('spacing', 0)))
-    sheet_data.set('A5', 'SheetThickness')
+    sheet_data.set('A5', PROP_SHEET_THICKNESS)
     sheet_data.set('B5', str(ui_params.get('sheet_thickness', 3.0)))
-    sheet_data.set('A6', 'FontFile')
+    sheet_data.set('A6', PROP_FONT_FILE)
     sheet_data.set('B6', ui_params.get('font_path', ''))
 
     if sheet_efficiencies:

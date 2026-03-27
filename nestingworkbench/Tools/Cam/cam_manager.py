@@ -6,6 +6,7 @@ and managing CAM jobs from the nested layouts.
 """
 
 import FreeCAD
+from ...constants import *
 
 class CAMManager:
     """Manages the creation of FreeCAD CAM jobs from nested layouts."""
@@ -59,15 +60,15 @@ class CAMManager:
         
         # Try to read from layout group properties first (most reliable)
         if self.layout_group:
-            if hasattr(self.layout_group, 'SheetWidth'):
+            if hasattr(self.layout_group, PROP_SHEET_WIDTH):
                 sheet_width = float(self.layout_group.SheetWidth)
-            if hasattr(self.layout_group, 'SheetHeight'):
+            if hasattr(self.layout_group, PROP_SHEET_HEIGHT):
                 sheet_height = float(self.layout_group.SheetHeight)
-            if hasattr(self.layout_group, 'SheetThickness'):
+            if hasattr(self.layout_group, PROP_SHEET_THICKNESS):
                 sheet_thickness = float(self.layout_group.SheetThickness)
             
             # Fallback to spreadsheet if properties don't exist
-            if not hasattr(self.layout_group, 'SheetWidth'):
+            if not hasattr(self.layout_group, PROP_SHEET_WIDTH):
                 spreadsheet = self.layout_group.getObject("LayoutParameters")
                 if spreadsheet:
                     try:

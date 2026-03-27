@@ -9,6 +9,7 @@ from PySide import QtGui, QtCore
 import FreeCAD
 import FreeCADGui
 import os
+from ...constants import *
 
 _MINKOWSKI_DIR_MAX = 359
 
@@ -438,14 +439,14 @@ class NestingPanel(QtGui.QWidget):
 
     def load_persisted_settings(self):
         """Loads settings from FreeCAD preferences."""
-        prefs = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/NestingWorkbench")
-        self.sheet_width_input.setValue(prefs.GetFloat("SheetWidth", 600.0))
-        self.sheet_height_input.setValue(prefs.GetFloat("SheetHeight", 600.0))
-        self.part_spacing_input.setValue(prefs.GetFloat("PartSpacing", 12.5))
-        self.sheet_thickness_input.setValue(prefs.GetFloat("SheetThickness", 3.0))
-        self.label_size_input.setValue(prefs.GetFloat("LabelSize", 10.0))
+        prefs = FreeCAD.ParamGet(PREFS_PATH)
+        self.sheet_width_input.setValue(prefs.GetFloat(PROP_SHEET_WIDTH, 600.0))
+        self.sheet_height_input.setValue(prefs.GetFloat(PROP_SHEET_HEIGHT, 600.0))
+        self.part_spacing_input.setValue(prefs.GetFloat(PROP_PART_SPACING, 12.5))
+        self.sheet_thickness_input.setValue(prefs.GetFloat(PROP_SHEET_THICKNESS, 3.0))
+        self.label_size_input.setValue(prefs.GetFloat(PROP_LABEL_SIZE, 10.0))
         # Load deflection angle (new format) or use default of 30°
-        deflection_angle = prefs.GetFloat("DeflectionAngle", 0)
+        deflection_angle = prefs.GetFloat(PROP_DEFLECTION_ANGLE, 0)
         if deflection_angle == 0:
             # Backward compatibility: convert old Deflection (mm) to angle, or use 30° default
             old_deflection = prefs.GetFloat("Deflection", 0)
@@ -454,8 +455,8 @@ class NestingPanel(QtGui.QWidget):
             else:
                 deflection_angle = 30  # Default
         self.deflection_input.setValue(deflection_angle)
-        self.simplification_input.setValue(prefs.GetFloat("Simplification", 1.0))
-        self.use_gpu_checkbox.setChecked(prefs.GetBool("UseGPU", False))
+        self.simplification_input.setValue(prefs.GetFloat(PROP_SIMPLIFICATION, 1.0))
+        self.use_gpu_checkbox.setChecked(prefs.GetBool(PROP_USE_GPU, False))
         self.verbose_logging_checkbox.setChecked(prefs.GetBool("VerboseLogging", False))
         
         # Load Rotation Steps

@@ -8,6 +8,7 @@ finding, stacking, and unstacking the generated sheet layouts.
 import FreeCAD
 import ast
 from ...freecad_helpers import get_layout_group, get_sheet_groups, get_all_objects_recursive
+from ...constants import *
 
 class SheetStacker:
     """Handles the logic for finding, stacking, and unstacking sheet layouts."""
@@ -27,7 +28,7 @@ class SheetStacker:
 
         try:
             # Check for properties directly on the group object
-            if hasattr(self.layout_group, 'SheetWidth') and hasattr(self.layout_group, 'PartSpacing'):
+            if hasattr(self.layout_group, PROP_SHEET_WIDTH) and hasattr(self.layout_group, PROP_PART_SPACING):
                 return {"width": self.layout_group.SheetWidth, "spacing": self.layout_group.PartSpacing}
             else:
                 FreeCAD.Console.PrintWarning("Could not find parameter properties on the layout group. Stacking may be inaccurate.\n")

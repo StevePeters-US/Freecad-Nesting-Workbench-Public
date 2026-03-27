@@ -6,6 +6,7 @@ This module defines a custom FreeCAD scripted object for representing a sheet.
 
 import FreeCAD
 import Part
+from ..constants import *
 
 class SheetObject:
     """A scripted object representing a single sheet of material."""
@@ -13,8 +14,8 @@ class SheetObject:
     def __init__(self, obj):
         """Called when a new object is created."""
         obj.Proxy = self
-        obj.addProperty("App::PropertyLength", "SheetWidth", "Sheet", "The width of the sheet").SheetWidth = 600.0
-        obj.addProperty("App::PropertyLength", "SheetHeight", "Sheet", "The height of the sheet").SheetHeight = 600.0
+        obj.addProperty(PROP_LENGTH, PROP_SHEET_WIDTH, "Sheet", "The width of the sheet").SheetWidth = 600.0
+        obj.addProperty(PROP_LENGTH, PROP_SHEET_HEIGHT, "Sheet", "The height of the sheet").SheetHeight = 600.0
         obj.ViewObject.Proxy = 0 # Make sure the default view provider is used
 
     def execute(self, fp):

@@ -10,6 +10,7 @@ from ...datatypes.shape import Shape
 from .shape_preparer import ShapePreparer
 from .layout_manager import LayoutManager, Layout
 from ...freecad_helpers import recursive_delete
+from ...constants import *
 
 try:
     from .nesting_logic import nest, NestingDependencyError
@@ -220,22 +221,21 @@ class NestingJob:
 
     def _apply_properties(self, layout_obj):
         p = self.params
-        self._set_prop(layout_obj, "App::PropertyLength", "SheetWidth", p['sheet_width'])
-        self._set_prop(layout_obj, "App::PropertyLength", "SheetHeight", p['sheet_height'])
-        self._set_prop(layout_obj, "App::PropertyLength", "PartSpacing", p['spacing'])
-        self._set_prop(layout_obj, "App::PropertyLength", "SheetThickness", p['sheet_thickness'])
-        self._set_prop(layout_obj, "App::PropertyFloat", "DeflectionAngle", p.get('deflection_angle', 30))  # Save angle in degrees
-        self._set_prop(layout_obj, "App::PropertyFloat", "Simplification", p.get('simplification', 1.0))
-        self._set_prop(layout_obj, "App::PropertyFile", "FontFile", p['font_path'])
-        self._set_prop(layout_obj, "App::PropertyBool", "ShowBounds", p['show_bounds'])
-        self._set_prop(layout_obj, "App::PropertyBool", "AddLabels", p['add_labels'])
-        self._set_prop(layout_obj, "App::PropertyLength", "LabelHeight", p['label_height'])
-        self._set_prop(layout_obj, "App::PropertyFloat", "LabelSize", p['label_size'])
-        self._set_prop(layout_obj, "App::PropertyInteger", "GlobalRotationSteps", p['rotation_steps'])
-        self._set_prop(layout_obj, "App::PropertyInteger", "Generations", p.get('generations', 1))
-        self._set_prop(layout_obj, "App::PropertyInteger", "Generations", p.get('generations', 1))
-        self._set_prop(layout_obj, "App::PropertyInteger", "PopulationSize", p.get('population_size', 1))
-        self._set_prop(layout_obj, "App::PropertyBool", "UseGPU", p.get('use_gpu', False))
+        self._set_prop(layout_obj, PROP_LENGTH, PROP_SHEET_WIDTH, p['sheet_width'])
+        self._set_prop(layout_obj, PROP_LENGTH, PROP_SHEET_HEIGHT, p['sheet_height'])
+        self._set_prop(layout_obj, PROP_LENGTH, PROP_PART_SPACING, p['spacing'])
+        self._set_prop(layout_obj, PROP_LENGTH, PROP_SHEET_THICKNESS, p['sheet_thickness'])
+        self._set_prop(layout_obj, PROP_FLOAT, PROP_DEFLECTION_ANGLE, p.get('deflection_angle', 30))  # Save angle in degrees
+        self._set_prop(layout_obj, PROP_FLOAT, PROP_SIMPLIFICATION, p.get('simplification', 1.0))
+        self._set_prop(layout_obj, PROP_FILE, PROP_FONT_FILE, p['font_path'])
+        self._set_prop(layout_obj, PROP_BOOL, PROP_SHOW_BOUNDS, p['show_bounds'])
+        self._set_prop(layout_obj, PROP_BOOL, PROP_ADD_LABELS, p['add_labels'])
+        self._set_prop(layout_obj, PROP_LENGTH, PROP_LABEL_HEIGHT, p['label_height'])
+        self._set_prop(layout_obj, PROP_FLOAT, PROP_LABEL_SIZE, p['label_size'])
+        self._set_prop(layout_obj, PROP_INTEGER, PROP_GLOBAL_ROTATION_STEPS, p['rotation_steps'])
+        self._set_prop(layout_obj, PROP_INTEGER, PROP_GENERATIONS, p.get('generations', 1))
+        self._set_prop(layout_obj, PROP_INTEGER, PROP_POPULATION_SIZE, p.get('population_size', 1))
+        self._set_prop(layout_obj, PROP_BOOL, PROP_USE_GPU, p.get('use_gpu', False))
 
     def _set_prop(self, obj, type_str, name, val):
         if not hasattr(obj, name):
@@ -290,7 +290,7 @@ class NestingController:
         algo_kwargs['verbose'] = verbose
         
         # Persist verbose setting
-        prefs = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/NestingWorkbench")
+        prefs = FreeCAD.ParamGet(PREFS_PATH)
         prefs.SetBool("VerboseLogging", verbose)
         
         # 3. Execute nesting using unified GA path
@@ -340,35 +340,35 @@ class NestingController:
         self.ui.hidden_originals = []
 
         # Read parameters directly from the layout group's properties
-        if hasattr(layout_group, 'SheetWidth'):
+        if hasattr(layout_group, PROP_SHEET_WIDTH):
             self.ui.sheet_width_input.setValue(layout_group.SheetWidth)
-        if hasattr(layout_group, 'SheetHeight'):
+        if hasattr(layout_group, PROP_SHEET_HEIGHT):
             self.ui.sheet_height_input.setValue(layout_group.SheetHeight)
-        if hasattr(layout_group, 'PartSpacing'):
+        if hasattr(layout_group, PROP_PART_SPACING):
             self.ui.part_spacing_input.setValue(layout_group.PartSpacing)
-        if hasattr(layout_group, 'SheetThickness'):
+        if hasattr(layout_group, PROP_SHEET_THICKNESS):
             self.ui.sheet_thickness_input.setValue(layout_group.SheetThickness)
         
         # Load deflection angle (new format) or convert old deflection mm to angle
-        if hasattr(layout_group, 'DeflectionAngle'):
+        if hasattr(layout_group, PROP_DEFLECTION_ANGLE):
             self.ui.deflection_input.setValue(layout_group.DeflectionAngle)
         elif hasattr(layout_group, 'Deflection'):
             # Backward compatibility: convert old Deflection (mm) to angle
             deflection_angle = layout_group.Deflection * 200.0
             self.ui.deflection_input.setValue(deflection_angle)
             
-        if hasattr(layout_group, 'Simplification'):
+        if hasattr(layout_group, PROP_SIMPLIFICATION):
             self.ui.simplification_input.setValue(layout_group.Simplification)
-        if hasattr(layout_group, 'FontFile') and os.path.exists(layout_group.FontFile):
+        if hasattr(layout_group, PROP_FONT_FILE) and os.path.exists(layout_group.FontFile):
             self.ui.selected_font_path = layout_group.FontFile
             self.ui.font_label.setText(os.path.basename(layout_group.FontFile))
-        if hasattr(layout_group, 'LabelSize'):
+        if hasattr(layout_group, PROP_LABEL_SIZE):
             self.ui.label_size_input.setValue(layout_group.LabelSize)
-        if hasattr(layout_group, 'Generations'):
+        if hasattr(layout_group, PROP_GENERATIONS):
             self.ui.minkowski_generations_input.setValue(layout_group.Generations)
-        if hasattr(layout_group, 'PopulationSize'):
+        if hasattr(layout_group, PROP_POPULATION_SIZE):
             self.ui.minkowski_population_size_input.setValue(layout_group.PopulationSize)
-        if hasattr(layout_group, 'UseGPU'):
+        if hasattr(layout_group, PROP_USE_GPU):
             self.ui.use_gpu_checkbox.setChecked(layout_group.UseGPU)
 
         # Get the shapes from the layout
@@ -420,8 +420,7 @@ class NestingController:
             )
             
             # Load Global Rotation Steps if present
-            # Load Global Rotation Steps if present
-            if hasattr(layout_group, "GlobalRotationSteps"):
+            if hasattr(layout_group, PROP_GLOBAL_ROTATION_STEPS):
                 steps = layout_group.GlobalRotationSteps
                 if steps > 0:
                     target_angle = 360.0 / steps
@@ -1023,19 +1022,19 @@ class NestingController:
 
     def save_settings(self, settings):
         """Saves current UI settings to FreeCAD preferences."""
-        prefs = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/NestingWorkbench")
-        prefs.SetFloat("SheetWidth", float(settings['sheet_width']))
-        prefs.SetFloat("SheetHeight", float(settings['sheet_height']))
-        prefs.SetFloat("PartSpacing", float(settings['spacing']))
-        prefs.SetFloat("SheetThickness", float(settings['sheet_thickness']))
-        prefs.SetFloat("DeflectionAngle", float(settings.get('deflection_angle', 10)))  # Save angle, not mm
-        prefs.SetFloat("Simplification", float(settings['simplification']))
+        prefs = FreeCAD.ParamGet(PREFS_PATH)
+        prefs.SetFloat(PROP_SHEET_WIDTH, float(settings['sheet_width']))
+        prefs.SetFloat(PROP_SHEET_HEIGHT, float(settings['sheet_height']))
+        prefs.SetFloat(PROP_PART_SPACING, float(settings['spacing']))
+        prefs.SetFloat(PROP_SHEET_THICKNESS, float(settings['sheet_thickness']))
+        prefs.SetFloat(PROP_DEFLECTION_ANGLE, float(settings.get('deflection_angle', 10)))  # Save angle, not mm
+        prefs.SetFloat(PROP_SIMPLIFICATION, float(settings['simplification']))
         prefs.SetInt("RotationSteps", int(settings['rotation_steps']))
-        prefs.SetBool("AddLabels", bool(settings['add_labels']))
-        prefs.SetBool("ShowBounds", bool(settings['show_bounds']))
-        prefs.SetFloat("LabelHeight", float(settings['label_height']))
-        prefs.SetFloat("LabelSize", float(settings['label_size']))
-        prefs.SetBool("UseGPU", bool(settings.get('use_gpu', False)))
+        prefs.SetBool(PROP_ADD_LABELS, bool(settings['add_labels']))
+        prefs.SetBool(PROP_SHOW_BOUNDS, bool(settings['show_bounds']))
+        prefs.SetFloat(PROP_LABEL_HEIGHT, float(settings['label_height']))
+        prefs.SetFloat(PROP_LABEL_SIZE, float(settings['label_size']))
+        prefs.SetBool(PROP_USE_GPU, bool(settings.get('use_gpu', False)))
         if settings['font_path']:
              prefs.SetString("FontPath", str(settings['font_path']))
 

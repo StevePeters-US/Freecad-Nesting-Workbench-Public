@@ -1,0 +1,31 @@
+"""
+Centralized FreeCAD property names and type strings for the Nesting Workbench.
+Import these constants instead of using hardcoded strings.
+"""
+
+# -- FreeCAD Property Type Strings --
+PROP_LENGTH = "App::PropertyLength"
+PROP_FLOAT = "App::PropertyFloat"
+PROP_BOOL = "App::PropertyBool"
+PROP_INTEGER = "App::PropertyInteger"
+PROP_FILE = "App::PropertyFile"
+
+# -- Layout Property Names --
+PROP_SHEET_WIDTH = "SheetWidth"
+PROP_SHEET_HEIGHT = "SheetHeight"
+PROP_PART_SPACING = "PartSpacing"
+PROP_SHEET_THICKNESS = "SheetThickness"
+PROP_DEFLECTION_ANGLE = "DeflectionAngle"
+PROP_SIMPLIFICATION = "Simplification"
+PROP_FONT_FILE = "FontFile"
+PROP_SHOW_BOUNDS = "ShowBounds"
+PROP_ADD_LABELS = "AddLabels"
+PROP_LABEL_HEIGHT = "LabelHeight"
+PROP_LABEL_SIZE = "LabelSize"
+PROP_GLOBAL_ROTATION_STEPS = "GlobalRotationSteps"
+PROP_GENERATIONS = "Generations"
+PROP_POPULATION_SIZE = "PopulationSize"
+PROP_USE_GPU = "UseGPU"
+
+# -- FreeCAD Preferences Path --
+PREFS_PATH = "User parameter:BaseApp/Preferences/NestingWorkbench"
