@@ -177,6 +177,7 @@ class ManualNesterToolObserver:
                     self.original_visibilities[sheet_boundary] = sheet_boundary.ViewObject.Visibility
                     sheet_boundary.ViewObject.Visibility = True
 
+                tracked_in_shapes = False
                 for sub_group in sheet_group.Group:
                     if sub_group.isDerivedFrom("App::DocumentObjectGroup") and sub_group.Label.startswith("Shapes_"):
                         for obj in sub_group.Group:
@@ -192,6 +193,17 @@ class ManualNesterToolObserver:
 
                             if is_top_level and (obj.TypeId == "App::Part" or hasattr(obj, "Shape")):
                                 self._track_single_object(obj, sheet_group)
+                                tracked_in_shapes = True
+
+                # Fallback: if Shapes_ groups were empty (e.g. reparented by FreeCAD after
+                # a bad recursive_delete), track App::Part containers directly under Sheet_.
+                if not tracked_in_shapes:
+                    for obj in sheet_group.Group:
+                        if obj.TypeId == "App::Part" and obj.Label.startswith("nested_"):
+                            self._track_single_object(obj, sheet_group)
+                            FreeCAD.Console.PrintMessage(
+                                f"[Track] Fallback: tracking {obj.Label} directly under {sheet_group.Label}\n"
+                            )
 
                 # Make existing sheet boundary unselectable
                 if sheet_boundary and hasattr(sheet_boundary, "ViewObject"):

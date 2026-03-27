@@ -108,6 +108,13 @@ See `.agents/rules/scopecontrol.md`. Only change what is requested — no drive-
 - `Shape.nfp_cache_lock` guards the class-level NFP cache
 - FreeCAD's document model is NOT thread-safe — all mutations on main thread only
 
+### Visualization Thread Safety
+
+- Always check `FreeCAD.GuiUp` before accessing `ViewObject` or Coin3D scene graph.
+- Never call `FreeCADGui.Selection.*` or modify the scene graph from within a Coin3D event callback — use `QTimer.singleShot(0, handler)` to defer.
+- Use `FreeCADGui.updateGui()` to yield to the event loop from long operations — never use `QApplication.processEvents()` (causes re-entrant signals).
+- When setting `ViewObject` properties in a loop (e.g., visibility, transparency, color), wrap in `try/except RuntimeError` to handle objects deleted by other threads.
+
 ### Units
 
 - All internal values are in **millimetres**

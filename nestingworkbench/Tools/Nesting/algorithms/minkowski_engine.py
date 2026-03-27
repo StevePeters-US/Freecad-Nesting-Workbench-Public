@@ -9,7 +9,11 @@ from shapely.ops import unary_union
 from . import minkowski_utils
 try:
     from . import nfp_gpu_taichi
-except ImportError:
+except ImportError as e:
+    import traceback
+    traceback.print_exc()
+    import FreeCAD
+    FreeCAD.Console.PrintError(f"nfp_gpu_taichi Import Error: {e}\n")
     nfp_gpu_taichi = None
 from ....datatypes.shape import Shape
 
