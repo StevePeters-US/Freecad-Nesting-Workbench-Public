@@ -121,7 +121,7 @@ class NestingPanel(QtGui.QWidget):
 
 
         # --- Minkowski Packer Settings ---
-        self.minkowski_settings_group = QtGui.QGroupBox("Minkowski Nester Settings")
+        self.minkowski_settings_group = QtGui.QGroupBox("Minkowski Nesting Settings")
         minkowski_form_layout = QtGui.QFormLayout()
 
         # Direction Dial for Minkowski
@@ -148,7 +148,7 @@ class NestingPanel(QtGui.QWidget):
         self.minkowski_random_checkbox.setToolTip("If checked, each part will use a randomized placement weighting.")
         self.minkowski_random_checkbox.stateChanged.connect(lambda state: self.minkowski_direction_dial.setDisabled(state))
 
-        minkowski_form_layout.addRow("Packing Direction:", minkowski_dial_layout)
+        minkowski_form_layout.addRow("Nesting Direction:", minkowski_dial_layout)
         minkowski_form_layout.addRow(self.minkowski_random_checkbox)
         
         self.clear_cache_checkbox = QtGui.QCheckBox("Clear NFP Cache")

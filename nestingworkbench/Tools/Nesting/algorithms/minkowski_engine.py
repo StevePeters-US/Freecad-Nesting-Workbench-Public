@@ -1,5 +1,6 @@
 
 import math
+import time
 import FreeCAD
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
@@ -22,7 +23,7 @@ class MinkowskiEngine:
     Handles geometric operations for Minkowski nesting, such as NFP generation,
     candidate point finding, and placement validation.
     """
-    def __init__(self, bin_width, bin_height, step_size, discretize_edges=True, log_callback=None, use_gpu=False, verbose=False):
+    def __init__(self, bin_width, bin_height, step_size, discretize_edges=True, log_callback=None, use_gpu=False, verbose=False, search_direction=(0, -1)):
         self.bin_width = bin_width
         self.bin_height = bin_height
         self.step_size = step_size
@@ -34,6 +35,7 @@ class MinkowskiEngine:
         self._decomp_cache = {} 
         self._decomp_lock = Lock()
         self.use_gpu = use_gpu and nfp_gpu_taichi and nfp_gpu_taichi.is_available() # Check availability
+        self.search_direction = search_direction
         self._log_lock = Lock()
         
         if use_gpu:
@@ -66,7 +68,8 @@ class MinkowskiEngine:
                     'polygon': Polygon(), # Start empty
                     'last_part_idx': 0,
                     'points': [],
-                    'prepared': None
+                    'prepared': None,
+                    'convex_pieces': [] # GPU-002: Store individual pieces
                 }
             entry = sheet.nfp_cache[cache_key]
             target_idx = len(sheet.parts)
@@ -120,11 +123,24 @@ class MinkowskiEngine:
         
         with sheet.nfp_cache_lock:
             if new_polys:
-                batch_union = unary_union(new_polys)
-                if entry['polygon'].is_empty:
-                    entry['polygon'] = batch_union
+                if self.use_gpu:
+                    # GPU-002: Use exact union for visualization, but keep individual hulls for GPU scoring
+                    batch_union = unary_union(new_polys)
+                    if entry['polygon'].is_empty:
+                        entry['polygon'] = batch_union
+                    else:
+                        entry['polygon'] = entry['polygon'].union(batch_union)
+                    
+                    if 'convex_pieces' not in entry:
+                        entry['convex_pieces'] = []
+                    entry['convex_pieces'].extend(new_polys)
                 else:
-                    entry['polygon'] = entry['polygon'].union(batch_union)
+                    batch_union = unary_union(new_polys)
+                    if entry['polygon'].is_empty:
+                        entry['polygon'] = batch_union
+                    else:
+                        entry['polygon'] = entry['polygon'].union(batch_union)
+
                 if not entry['polygon'].is_valid:
                     entry['polygon'] = entry['polygon'].buffer(0)
 
@@ -190,37 +206,67 @@ class MinkowskiEngine:
             from shapely.affinity import scale
             parts_b_reflected = [scale(p, xfact=-1.0, yfact=-1.0, origin=(0,0)) for p in poly_b_parts]
             
-            all_convex_pairs = []
-            pair_map = []
-            
+            # Group missing pairs by shape_A to use compute_nfp_batch effectively
+            grouped_by_A = {}
             for m_pair in missing_pairs:
-                shape_A = m_pair['shape_A']
+                shape_id = m_pair['shape_A'].source_freecad_object.Label
+                if shape_id not in grouped_by_A:
+                    grouped_by_A[shape_id] = {'shape': m_pair['shape_A'], 'missing': []}
+                grouped_by_A[shape_id]['missing'].append(m_pair)
+            
+            for shape_id, group in grouped_by_A.items():
+                shape_A = group['shape']
                 poly_A_parts = self._get_decomposition(shape_A)
-                rel_angle_rad = math.radians(m_pair['angle_B'])
-                sum_indices = []
-                for pA in poly_A_parts:
-                    for pB in parts_b_reflected:
-                        sum_indices.append(len(all_convex_pairs))
-                        all_convex_pairs.append((pA, pB, rel_angle_rad))
-                pair_map.append({'key': m_pair['key'], 'indices': sum_indices})
-            
-            if not all_convex_pairs:
-                return
+                
+                # Unique angles for this A
+                m_pairs = group['missing']
+                angles_deg = sorted(list(set(p['angle_B'] for p in m_pairs)))
+                
+                if self.verbose:
+                    self.log(f"GPU batch: {len(poly_A_parts)}x{len(parts_b_reflected)} pairs, {len(angles_deg)} angles")
+                
+                # GPU-006: Timing
+                t0 = time.perf_counter()
+                
+                # GPU-004: Compute all NFPs for this A-B pair across all angles
+                results_per_rotation = nfp_gpu_taichi.compute_nfp_batch(
+                    poly_A_parts, parts_b_reflected, angles_deg
+                )
+                
+                dt_gpu = (time.perf_counter() - t0) * 1000
+                if self.verbose:
+                    self.log(f"GPU batch compute: {dt_gpu:.1f}ms")
+                
+                t_union = 0
+                # Map results back to cache keys
+                angle_to_results = dict(zip(angles_deg, results_per_rotation))
+                
+                for m_pair in m_pairs:
+                    angle = m_pair['angle_B']
+                    cache_key = m_pair['key']
+                    hulls = angle_to_results.get(angle, [])
+                    
+                    if hulls:
+                        t_u0 = time.perf_counter()
+                        # GPU-003: GPU Union (conservative approximation)
+                        union_poly = nfp_gpu_taichi.union_convex_hulls_gpu(hulls)
+                        if union_poly is None:
+                            # Fallback to CPU
+                            if self.verbose:
+                                FreeCAD.Console.PrintLog("[MinkowskiEngine] GPU batch union fallback to CPU\n")
+                            union_poly = unary_union(hulls)
+                        t_union += (time.perf_counter() - t_u0) * 1000
 
-            all_hulls = nfp_gpu_taichi.compute_nfp_pairs(all_convex_pairs)
-            
-            for item in pair_map:
-                cache_key = item['key']
-                indices = item['indices']
-                hulls = [all_hulls[idx] for idx in indices if all_hulls[idx] is not None]
-                if hulls:
-                    union_poly = unary_union(hulls)
-                    if not union_poly.is_valid:
-                        union_poly = union_poly.buffer(0)
-                    nfp_data = {'polygon': union_poly, 'points': [], 'error': None}
-                    with Shape.nfp_cache_lock:
-                        if cache_key not in Shape.nfp_cache:
-                            Shape.nfp_cache[cache_key] = nfp_data
+                        if not union_poly.is_valid:
+                            union_poly = union_poly.buffer(0)
+                        
+                        nfp_data = {'polygon': union_poly, 'points': [], 'error': None}
+                        with Shape.nfp_cache_lock:
+                            if cache_key not in Shape.nfp_cache:
+                                Shape.nfp_cache[cache_key] = nfp_data
+                                
+                if self.verbose and t_union > 0:
+                    self.log(f"GPU batch union total: {t_union:.1f}ms")
         except Exception as e:
             self.log(f"Batch NFP precompute error: {e}")
 
@@ -231,33 +277,61 @@ class MinkowskiEngine:
              
         import numpy as np
         best_overall = {'metric': float('inf')}
-        direction = getattr(self, 'search_direction', (0, -1))
-        dir_x, dir_y = direction
+        dir_x, dir_y = self.search_direction
 
         for angle, points in rotation_candidates:
             nfp_entry = self.get_global_nfp_for(part_to_place, angle, sheet)
-            convex_nfps = []
-            if nfp_entry and not nfp_entry['polygon'].is_empty:
+            
+            # GPU-002: Use pre-collected individual convex pieces
+            convex_nfps = nfp_entry.get('convex_pieces', [])
+            
+            # If for some reason we don't have pieces (e.g. legacy cache), fallback to decomposition
+            if not convex_nfps and not nfp_entry['polygon'].is_empty:
                 poly_union = nfp_entry['polygon']
                 if poly_union.geom_type == 'Polygon':
-                    convex_nfps.extend(minkowski_utils.decompose_if_needed(poly_union, self.log))
+                    convex_nfps = minkowski_utils.decompose_if_needed(poly_union, self.log)
                 elif poly_union.geom_type == 'MultiPolygon':
+                    convex_nfps = []
                     for p in poly_union.geoms:
                         convex_nfps.extend(minkowski_utils.decompose_if_needed(p, self.log))
 
             pts_np = np.array([[p.x, p.y] for p in points], dtype=np.float32)
             results = nfp_gpu_taichi.compute_batch_pip(pts_np, convex_nfps) if convex_nfps else np.zeros(len(points), dtype=np.int32)
             
+            # GPU-005: Batch container bounds check
             rotated_poly = rotate(part_to_place.original_polygon, angle, origin='centroid')
             centroid = rotated_poly.centroid
+            min_x, min_y, max_x, max_y = rotated_poly.bounds
+            rel_extents = np.array([
+                min_x - centroid.x, 
+                min_y - centroid.y, 
+                max_x - centroid.x, 
+                max_y - centroid.y
+            ], dtype=np.float32)
+            
+            extents_np = np.tile(rel_extents, (len(points), 1))
+            bounds_results = np.zeros(len(points), dtype=np.int32)
+            
+            with nfp_gpu_taichi._kernel_lock:
+                nfp_gpu_taichi.bounds_check_kernel(
+                    len(points), pts_np, extents_np, 
+                    float(self.bin_width), float(self.bin_height), 
+                    bounds_results
+                )
+            
+            n_scored = 0
             for i, pt in enumerate(points):
-                if results[i] == 1: continue
-                dx, dy = pt.x - centroid.x, pt.y - centroid.y
-                test_poly = translate(rotated_poly, xoff=dx, yoff=dy)
-                if not self.bin_polygon.contains(test_poly): continue
+                if results[i] == 1: continue # NFP collision
+                if bounds_results[i] == 0: continue # Out of bounds
+                
+                # If we're here, it passed both GPU checks
                 metric = pt.x * (-dir_x) + pt.y * (-dir_y)
                 if metric < best_overall['metric']:
                     best_overall = {'x': pt.x, 'y': pt.y, 'angle': angle, 'metric': metric}
+                n_scored += 1
+            
+            if self.verbose and n_scored > 0:
+                self.log(f"GPU scored {n_scored} candidates in batch at angle {angle}")
         return best_overall
 
     def _calculate_and_cache_nfp(self, shape_A, angle_A, part_to_place, angle_B, cache_key):
@@ -305,10 +379,32 @@ class MinkowskiEngine:
             for pA in poly_A_parts:
                 for pB in parts_b_reflected:
                     pairs.append((pA, pB, rel_angle_rad))
+            
+            # GPU-006: Timing
+            t0 = time.perf_counter()
             hulls = nfp_gpu_taichi.compute_nfp_pairs(pairs)
+            dt_gpu = (time.perf_counter() - t0) * 1000
+            if self.verbose:
+                self.log(f"GPU NFP pairs ({len(pairs)} pairs): {dt_gpu:.1f}ms")
+                
             valid_hulls = [h for h in hulls if h is not None]
-            nfp_exterior_poly = unary_union(valid_hulls) if valid_hulls else None
-            if nfp_exterior_poly and not nfp_exterior_poly.is_valid: nfp_exterior_poly = nfp_exterior_poly.buffer(0)
+            
+            # GPU-003: GPU Union (conservative approximation)
+            nfp_exterior_poly = None
+            if valid_hulls:
+                t_u0 = time.perf_counter()
+                nfp_exterior_poly = nfp_gpu_taichi.union_convex_hulls_gpu(valid_hulls)
+                if nfp_exterior_poly is None:
+                    # Fallback to CPU
+                    if self.verbose:
+                        FreeCAD.Console.PrintLog("[MinkowskiEngine] GPU union fallback to CPU\n")
+                    nfp_exterior_poly = unary_union(valid_hulls)
+                dt_union = (time.perf_counter() - t_u0) * 1000
+                if self.verbose:
+                    self.log(f"GPU NFP union: {dt_union:.1f}ms")
+
+            if nfp_exterior_poly and not nfp_exterior_poly.is_valid: 
+                nfp_exterior_poly = nfp_exterior_poly.buffer(0)
             if not nfp_exterior_poly or nfp_exterior_poly.is_empty: return None
 
             nfp_interiors = []

@@ -77,6 +77,9 @@ class PlacementOptimizer:
             res = self.engine.score_candidates_gpu(part, all_rotation_candidates, sheet)
             if res and res.get('metric', float('inf')) < best_result['metric']:
                 best_result = res
+                # BUG-003: Restore visual feedback for GPU path
+                if self.trial_callback and best_result.get('x') is not None:
+                     self.trial_callback(part, best_result['angle'], best_result['x'], best_result['y'])
         else:
             # CPU Parallel evaluation
             with ThreadPoolExecutor() as executor:
@@ -231,7 +234,7 @@ class Nester:
         
         step_size = kwargs.get("step_size", 5.0) 
         use_gpu = kwargs.get("use_gpu", False)
-        self.engine = MinkowskiEngine(width, height, step_size, log_callback=self.log_callback, use_gpu=use_gpu, verbose=self.verbose)
+        self.engine = MinkowskiEngine(width, height, step_size, log_callback=self.log_callback, use_gpu=use_gpu, verbose=self.verbose, search_direction=self.search_direction)
         self.optimizer = PlacementOptimizer(self.engine, rotation_steps, self.search_direction, self.log_callback, self.trial_callback)
         self.optimizer.verbose = self.verbose
 

@@ -243,6 +243,11 @@ class NestingJob:
         self._set_prop(layout_obj, PROP_INTEGER, PROP_GENERATIONS, p.get('generations', 1))
         self._set_prop(layout_obj, PROP_INTEGER, PROP_POPULATION_SIZE, p.get('population_size', 1))
         self._set_prop(layout_obj, PROP_BOOL, PROP_USE_GPU, p.get('use_gpu', False))
+        
+        # Save Nesting Direction as a vector/tuple if possible, or just the dial value
+        # For simplicity and transparency in the UI, we'll save the dial value (degrees)
+        dial_val = self.ui.minkowski_direction_dial.value()
+        self._set_prop(layout_obj, PROP_INTEGER, PROP_NESTING_DIRECTION, dial_val)
 
     def _set_prop(self, obj, type_str, name, val):
         if not hasattr(obj, name):
@@ -379,6 +384,8 @@ class NestingController:
             self.ui.minkowski_population_size_input.setValue(getattr(layout_group, PROP_POPULATION_SIZE))
         if hasattr(layout_group, PROP_USE_GPU):
             self.ui.use_gpu_checkbox.setChecked(getattr(layout_group, PROP_USE_GPU))
+        if hasattr(layout_group, PROP_NESTING_DIRECTION):
+            self.ui.minkowski_direction_dial.setValue(getattr(layout_group, PROP_NESTING_DIRECTION))
 
         # Get the shapes from the layout
         master_shapes_group = None

@@ -47,6 +47,9 @@ def get_backend():
     """Returns the name of the active Taichi backend, or None if unavailable."""
     return _taichi_arch if TAICHI_AVAILABLE else None
 
+# Max vertices for convex hulls computed on GPU.
+MAX_HULL_VERTS = 128
+
 if TAICHI_AVAILABLE:
     @ti.kernel
     def compute_nfp_pairs_kernel(
@@ -212,6 +215,193 @@ if TAICHI_AVAILABLE:
             
             results[p_idx] = is_found
 
+
+    @ti.kernel
+    def convex_hull_2d_kernel(
+        n_pairs: int,
+        points: ti.types.ndarray(),     # [n_pairs, max_pts, 2]  float32
+        n_points: ti.types.ndarray(),   # [n_pairs]              int32
+        hull_out: ti.types.ndarray(),   # [n_pairs, MAX_HULL_VERTS, 2]  float32
+        hull_len: ti.types.ndarray(),   # [n_pairs]              int32
+    ):
+        """
+        Computes the 2D convex hull of a point cloud for each pair using Jarvis March (Gift Wrapping).
+        Parallelized over n_pairs.
+        """
+        for p in range(n_pairs):
+            pts_count = n_points[p]
+            if pts_count < 3:
+                hull_len[p] = 0
+                continue
+            
+            # 1. Find the leftmost point (with the lowest x-coordinate)
+            # If there's a tie, pick the one with the lowest y-coordinate.
+            leftmost = 0
+            for i in range(1, pts_count):
+                if points[p, i, 0] < points[p, leftmost, 0]:
+                    leftmost = i
+                elif points[p, i, 0] == points[p, leftmost, 0]:
+                    if points[p, i, 1] < points[p, leftmost, 1]:
+                        leftmost = i
+            
+            # 2. Jarvis March
+            curr = leftmost
+            hull_idx = 0
+            
+            # Taichi doesn't allow infinite loops, so we use a bounded loop.
+            # MAX_HULL_VERTS is used as a safety bound.
+            for _h in range(MAX_HULL_VERTS):
+                hull_out[p, hull_idx, 0] = points[p, curr, 0]
+                hull_out[p, hull_idx, 1] = points[p, curr, 1]
+                hull_idx += 1
+                
+                # Find the next point such that all other points are to the left of the edge (curr, next_pt).
+                # We start by picking an arbitrary point (say 0, or (curr + 1) % pts_count).
+                next_pt = (curr + 1) % pts_count
+                
+                for i in range(pts_count):
+                    if i == curr:
+                        continue
+                    
+                    # Cross product of (points[curr], points[next_pt], points[i])
+                    # If (p2.x - p1.x) * (p3.y - p1.y) - (p2.y - p1.y) * (p3.x - p1.x) > 0, 
+                    # then p3 is to the left of p1->p2.
+                    p1x, p1y = points[p, curr, 0], points[p, curr, 1]
+                    p2x, p2y = points[p, next_pt, 0], points[p, next_pt, 1]
+                    p3x, p3y = points[p, i, 0], points[p, i, 1]
+                    
+                    cp = (p2x - p1x) * (p3y - p1y) - (p2y - p1y) * (p3x - p1x)
+                    
+                    if cp > 1e-6:
+                        next_pt = i
+                    elif ti.abs(cp) < 1e-6:
+                        # Collinear points: pick the one further from curr to keep the hull minimal but correct.
+                        dist_sq_next = (p2x - p1x)**2 + (p2y - p1y)**2
+                        dist_sq_i = (p3x - p1x)**2 + (p3y - p1y)**2
+                        if dist_sq_i > dist_sq_next:
+                            next_pt = i
+                
+                curr = next_pt
+                
+                # If we're back at the start, the hull is complete.
+                if curr == leftmost:
+                    break
+                
+                # Safety break if we exceed MAX_HULL_VERTS
+                if hull_idx >= MAX_HULL_VERTS:
+                    break
+            
+            hull_len[p] = hull_idx
+
+    def compute_convex_hulls_gpu(points_np, n_points_np):
+        """
+        GPU-accelerated convex hull computation for a batch of point clouds.
+        Returns a list of shapely.Polygon objects.
+        """
+        from shapely.geometry import Polygon
+        
+        n_pairs = len(n_points_np)
+        if n_pairs == 0:
+            return []
+            
+        max_pts = points_np.shape[1]
+        
+        hull_out_np = np.zeros((n_pairs, MAX_HULL_VERTS, 2), dtype=np.float32)
+        hull_len_np = np.zeros(n_pairs, dtype=np.int32)
+        
+        with _kernel_lock:
+            convex_hull_2d_kernel(
+                n_pairs,
+                points_np,
+                n_points_np,
+                hull_out_np,
+                hull_len_np
+            )
+            
+        results = []
+        for i in range(n_pairs):
+            count = hull_len_np[i]
+            if count < 3:
+                results.append(None)
+                continue
+            
+            # Build polygon from hull vertices
+            hull_vertices = hull_out_np[i, :count]
+            results.append(Polygon(hull_vertices))
+            
+        return results
+
+    # Max vertices per input polygon for GPU union fallback
+    POLY_MAX_VERTS = 64
+
+    def union_convex_hulls_gpu(hull_polygons):
+        """
+        Computes the convex hull of all input convex polygons on GPU.
+        This is a fast, conservative approximation of unary_union(hull_polygons).
+        """
+        if not hull_polygons:
+            return None
+        if len(hull_polygons) == 1:
+            return hull_polygons[0]
+            
+        # Fallback to CPU if any polygon is too complex for our fixed-size GPU buffers
+        # or if we have no polygons.
+        total_pts = 0
+        for p in hull_polygons:
+            if not p or p.is_empty:
+                continue
+            v_count = len(p.exterior.coords) - 1
+            if v_count > POLY_MAX_VERTS:
+                return None # Fallback
+            total_pts += v_count
+                
+        if total_pts < 3:
+            return None
+            
+        # Pack all vertices into a single point cloud for the GPU
+        points_np = np.zeros((1, total_pts, 2), dtype=np.float32)
+        current_idx = 0
+        for p in hull_polygons:
+            if not p or p.is_empty:
+                continue
+            coords = np.array(p.exterior.coords)[:-1]
+            points_np[0, current_idx:current_idx + len(coords)] = coords
+            current_idx += len(coords)
+            
+        n_points_np = np.array([total_pts], dtype=np.int32)
+        
+        # Call the GPU hull compute (reusing the kernel from GPU-001)
+        results = compute_convex_hulls_gpu(points_np, n_points_np)
+        return results[0] if results else None
+
+    @ti.kernel
+    def bounds_check_kernel(
+        n_pts: int,
+        points: ti.types.ndarray(),          # [n_pts, 2]  float32 — candidate centroids
+        rotated_extents: ti.types.ndarray(), # [n_pts, 4]  float32 — [min_x, min_y, max_x, max_y] per candidate relative to its centroid
+        bin_w: float,
+        bin_h: float,
+        results: ti.types.ndarray(),         # [n_pts]  int32 — 1=in-bounds, 0=out
+    ):
+        """
+        Check if each candidate (represented by centroid + rotated relative bounds) 
+        fits inside the rectangular bin [0, bin_w] x [0, bin_h].
+        """
+        for i in range(n_pts):
+            px = points[i, 0]
+            py = points[i, 1]
+            # Extents are relative to centroid
+            min_x = rotated_extents[i, 0]
+            min_y = rotated_extents[i, 1]
+            max_x = rotated_extents[i, 2]
+            max_y = rotated_extents[i, 3]
+            
+            if (px + min_x >= -1e-5 and px + max_x <= bin_w + 1e-5 and 
+                py + min_y >= -1e-5 and py + max_y <= bin_h + 1e-5):
+                results[i] = 1
+            else:
+                results[i] = 0
+
     def compute_batch_pip(points_np, convex_polys):
         """
         Efficiently check if a list of points are inside ANY of the provided convex polygons.
@@ -292,17 +482,8 @@ if TAICHI_AVAILABLE:
                 out_len_np
             )
             
-        results = []
-        for i in range(n_pairs):
-            count = out_len_np[i]
-            if count < 3:
-                results.append(None)
-                continue
-            points = out_verts_np[i, :count]
-            hull = MultiPoint(points).convex_hull
-            results.append(hull)
-            
-        return results
+        # GPU Convex Hull (GPU-001)
+        return compute_convex_hulls_gpu(out_verts_np, out_len_np)
 
 
     def compute_nfp_batch(poly_a_list, poly_b_list, rotations_deg):
@@ -379,32 +560,25 @@ if TAICHI_AVAILABLE:
                 out_len_np
             )
         
-        # Sync happened implicitly or explicitly? taichi ndarray syncs.
+        # GPU Convex Hull (GPU-001)
+        # Flatten (n_r, n_a, n_b) into (n_r * n_a * n_b) for compute_convex_hulls_gpu
+        total_minkowski_pairs = n_r * n_a * n_b
+        flat_out_verts = out_verts_np.reshape((total_minkowski_pairs, max_out_verts, 2))
+        flat_out_len = out_len_np.reshape(total_minkowski_pairs)
         
-        # Post-process on CPU: Compute Convex Hulls
-        # This is "embarrassingly parallel" on CPU too if we use threads, 
-        # but the sheer number of hulls might is high.
-        # However, for NFP we usually have few convex parts (e.g. 1-10 per shape).
+        flat_hulls = compute_convex_hulls_gpu(flat_out_verts, flat_out_len)
         
+        # Reshape results back to per-rotation lists
         results_per_rotation = []
-        
+        hull_idx = 0
         for r in range(n_r):
             minkowski_polys = []
             for i in range(n_a):
                 for j in range(n_b):
-                    count = out_len_np[r, i, j]
-                    if count < 3: continue
-                    
-                    points = out_verts_np[r, i, j, :count]
-                    
-                    # Create convex hull from these points
-                    # Shapely's MultiPoint(points).convex_hull is robust
-                    cloud = MultiPoint(points)
-                    hull = cloud.convex_hull
-                    
-                    if not hull.is_empty:
+                    hull = flat_hulls[hull_idx]
+                    if hull:
                         minkowski_polys.append(hull)
-                        
+                    hull_idx += 1
             results_per_rotation.append(minkowski_polys)
             
         return results_per_rotation
@@ -412,3 +586,9 @@ if TAICHI_AVAILABLE:
 else:
     def compute_nfp_batch(poly_a_list, poly_b_list, rotations_deg):
         raise ImportError("Taichi is not installed. Cannot compute GPU NFP.")
+
+    def union_convex_hulls_gpu(hull_polygons):
+        raise ImportError("Taichi is not installed. Cannot compute GPU Union.")
+
+    def bounds_check_kernel(n_pts, points, rotated_extents, bin_w, bin_h, results):
+        raise ImportError("Taichi is not installed. Cannot compute GPU bounds check.")

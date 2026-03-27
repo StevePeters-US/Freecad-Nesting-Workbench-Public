@@ -25,6 +25,7 @@ PROP_LABEL_SIZE = "LabelSize"
 PROP_GLOBAL_ROTATION_STEPS = "GlobalRotationSteps"
 PROP_GENERATIONS = "Generations"
 PROP_POPULATION_SIZE = "PopulationSize"
+PROP_NESTING_DIRECTION = "NestingDirection"
 PROP_USE_GPU = "UseGPU"
 
 # -- FreeCAD Preferences Path --
