@@ -1,31 +1,5 @@
 # Nesting/InitGui.py
 
-try:
-    import shapely
-except ImportError:
-    from PySide.QtGui import QMessageBox
-    from PySide import QtCore
-
-    title = "Nesting Workbench - Missing Dependency"
-    message = """
-<p>The 'shapely' library is not installed.</p>
-<p>This is a required dependency for the Nesting Workbench to function correctly.</p>
-<p><b>Instructions:</b></p>
-<ol>
-<li>Open a terminal (Command Prompt on Windows).</li>
-<li>Navigate to the 'bin' directory of your FreeCAD installation (C:\\Program Files\\FreeCAD 1.0\\bin).</li>
-<li>If 'pip' is not available, first run: <code>python -m ensurepip</code></li>
-<li>Install shapely by running: <code>python -m pip install shapely</code></li>
-</ol>
-<p>Please restart FreeCAD after the installation is complete.</p>
-"""
-    msgBox = QMessageBox()
-    msgBox.setWindowTitle(title)
-    msgBox.setTextFormat(QtCore.Qt.RichText)
-    msgBox.setText(message)
-    msgBox.setStandardButtons(QMessageBox.Ok)
-    msgBox.exec_()
-
 
 import FreeCAD
 import FreeCADGui
@@ -59,8 +33,6 @@ class NestingWorkbench(FreeCADGui.Workbench):
         from nesting_commands import command_export_sheets
         from nesting_commands import command_create_cam_job
         from nesting_commands import command_create_silhouette
-        from nesting_commands import command_install_dependencies
-        
         # Create Menu (Dropdown)
         self.appendMenu(["Nesting"], [
             'Nesting_Run',
@@ -68,9 +40,7 @@ class NestingWorkbench(FreeCADGui.Workbench):
             'Nesting_ManualNester',
             'Nesting_Export',
             'Nesting_CreateCAMJob',
-            'Nesting_CreateSilhouette',
-            "Separator",
-            'Nesting_InstallDependencies'
+            'Nesting_CreateSilhouette'
         ])
         self.appendToolbar("Nesting", [
             'Nesting_Run',

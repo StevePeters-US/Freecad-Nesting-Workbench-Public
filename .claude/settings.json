@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -m pytest tests/test_physics_engine.py -v)"
+      "Bash(python -m pytest tests/test_physics_engine.py -v)",
+      "Bash(python -m pytest tests/ -v)"
     ]
   }
 }
