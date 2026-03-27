@@ -184,6 +184,7 @@ Skills live in `.agents/skills/`. Each is a focused deep-dive on one topic.
 | `nw_icons` | Before creating or modifying toolbar icons |
 | `nw_todo_format` | Before writing new task entries |
 | `nw_freecad_patterns` | Before working with FreeCAD API (Placement, ViewObject, recompute) |
+| `nw_code_review_tasks` | Before fixing any CR-prefixed task from `todo_code_review.md` |
 | `logging` | Before adding log statements |
 
 ---
@@ -195,6 +196,7 @@ Skills live in `.agents/skills/`. Each is a focused deep-dive on one topic.
 | `TASKS.md` | Code quality, tests, architecture (T-NNN) | Atomic tasks with file:line refs |
 | `TODO.md` | Complex features (TASK-NNN) | Feature specs with acceptance criteria |
 | `todo_manual.md` | Manual nester enhancements (M-NNN, M-BNNN) | Architecture + implementation code |
+| `todo_code_review.md` | Code review action items (CR-NNN) | String constants, refactoring, agent guidelines |
 | `completed/` | Archived completed tasks | Moved from active lists when done |
 
 When fixing a task: follow `.agents/workflows/fix-task.md`.

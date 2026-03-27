@@ -45,6 +45,7 @@ class ManualNesterToolObserver:
         self.collision_resolver = CollisionResolver()
         self.physics_enabled = True
         self.obj_to_sheet = {} # Track which sheet each object belongs to
+        self._drag_active_sheet = None # Sheet the cursor was last over during drag
 
         # --- Input Manager ---
         self.input = InputManager(view)
@@ -157,6 +158,20 @@ class ManualNesterToolObserver:
 
     def _track_layout_objects(self):
         """Walks the layout group and tracks all parts."""
+        # Debug: log all sheet boundaries at startup
+        for child in self.layout_group.Group:
+            if child.isDerivedFrom("App::DocumentObjectGroup") and child.Label.startswith("Sheet_"):
+                b = next((obj for obj in child.Group if obj.Label.startswith("Sheet_Boundary_")), None)
+                if b and hasattr(b, "Shape"):
+                    bb = b.Shape.BoundBox
+                    bp = b.Placement.Base
+                    FreeCAD.Console.PrintMessage(
+                        f"[Sheet Debug] {child.Label}: "
+                        f"local_bb=({bb.XMin:.0f},{bb.YMin:.0f})-({bb.XMax:.0f},{bb.YMax:.0f}) "
+                        f"placement=({bp.x:.0f},{bp.y:.0f}) "
+                        f"global=({bb.XMin+bp.x:.0f},{bb.YMin+bp.y:.0f})-({bb.XMax+bp.x:.0f},{bb.YMax+bp.y:.0f})\n"
+                    )
+
         for sheet_group in self.layout_group.Group:
             if sheet_group.isDerivedFrom("App::DocumentObjectGroup") and sheet_group.Label.startswith("Sheet_"):
                 # Ensure sheet boundary is visible
@@ -495,11 +510,25 @@ class ManualNesterToolObserver:
 
         If the cursor is over a different sheet, the part jumps to that sheet's
         boundaries (enabling cross-sheet dragging).  If the cursor is in the
-        gap between sheets, fall back to the part's current sheet.
+        gap between sheets, keep clamping to the last sheet the cursor was over
+        so the part doesn't snap back to the original sheet.
         """
         clamp_sheet = self._find_sheet_at_pos(cursor_world_pos)
-        if not clamp_sheet:
-            clamp_sheet = self.obj_to_sheet.get(self.selected_obj)
+        prev_sheet = self._drag_active_sheet
+        if clamp_sheet:
+            if clamp_sheet != prev_sheet:
+                FreeCAD.Console.PrintMessage(
+                    f"[Clamp] Cursor over {clamp_sheet.Label} "
+                    f"(cursor=({cursor_world_pos.x:.0f},{cursor_world_pos.y:.0f}))\n"
+                )
+            self._drag_active_sheet = clamp_sheet
+        else:
+            clamp_sheet = self._drag_active_sheet or self.obj_to_sheet.get(self.selected_obj)
+            if not prev_sheet:
+                FreeCAD.Console.PrintMessage(
+                    f"[Clamp] Cursor in gap, fallback={clamp_sheet.Label if clamp_sheet else 'None'} "
+                    f"(cursor=({cursor_world_pos.x:.0f},{cursor_world_pos.y:.0f}))\n"
+                )
         if not clamp_sheet:
             return
         boundary = next((c for c in clamp_sheet.Group if c.Label.startswith("Sheet_Boundary_")), None)
@@ -694,6 +723,7 @@ class ManualNesterToolObserver:
         self.start_placement = None
         self.start_pos = None
         self.selected_obj = None
+        self._drag_active_sheet = None
 
         # Defer scene graph modification to avoid Coin3D crash inside callback
         QtCore.QTimer.singleShot(0, self._hide_radius_indicator)
@@ -704,6 +734,7 @@ class ManualNesterToolObserver:
         self.start_placement = None
         self.start_pos = None
         self.pre_drag_placements = {} # M-009: Clear pre-drag placements
+        self._drag_active_sheet = None
         try:
             self._hide_radius_indicator() # M-010
         except Exception:
@@ -911,9 +942,19 @@ class ManualNesterToolObserver:
                 boundary = next((obj for obj in sheet_group.Group if obj.Label.startswith("Sheet_Boundary_")), None)
                 if boundary:
                     bb = boundary.Shape.BoundBox
-                    # Account for boundary placement
-                    if pos.x >= (bb.XMin + boundary.Placement.Base.x) and pos.x <= (bb.XMax + boundary.Placement.Base.x) and \
-                       pos.y >= (bb.YMin + boundary.Placement.Base.y) and pos.y <= (bb.YMax + boundary.Placement.Base.y):
+                    bp = boundary.Placement.Base
+                    gx_min = bb.XMin + bp.x
+                    gx_max = bb.XMax + bp.x
+                    gy_min = bb.YMin + bp.y
+                    gy_max = bb.YMax + bp.y
+                    hit = (pos.x >= gx_min and pos.x <= gx_max and
+                           pos.y >= gy_min and pos.y <= gy_max)
+                    FreeCAD.Console.PrintMessage(
+                        f"[FindSheet] {sheet_group.Label}: "
+                        f"global=({gx_min:.0f},{gy_min:.0f})-({gx_max:.0f},{gy_max:.0f}) "
+                        f"pos=({pos.x:.0f},{pos.y:.0f}) hit={hit}\n"
+                    )
+                    if hit:
                         return sheet_group
         return None
 
@@ -950,7 +991,7 @@ class ManualNesterToolObserver:
         return 1000.0, 1000.0
 
     def _add_new_sheet(self):
-        """Adds a new sheet group with a boundary."""
+        """Adds a new sheet group with a boundary, positioned after the last existing sheet."""
         doc = self.layout_group.Document
         index = len([c for c in self.layout_group.Group if c.Label.startswith("Sheet_")]) + 1
 
@@ -960,13 +1001,37 @@ class ManualNesterToolObserver:
         sheet_group.Label = f"Sheet_{index}"
         self.layout_group.addObject(sheet_group)
 
+        # Find the rightmost edge and spacing of existing sheets
+        max_right = 0.0
+        spacing = width * 0.1  # default fallback
+        sheet_origins = []
+        for child in self.layout_group.Group:
+            if child.isDerivedFrom("App::DocumentObjectGroup") and child.Label.startswith("Sheet_") and child != sheet_group:
+                b = next((c for c in child.Group if c.Label.startswith("Sheet_Boundary_")), None)
+                if b and hasattr(b, "Shape"):
+                    bb = b.Shape.BoundBox
+                    right_edge = bb.XMax + b.Placement.Base.x
+                    if right_edge > max_right:
+                        max_right = right_edge
+                    sheet_origins.append(b.Placement.Base.x)
+
+        # Infer spacing from existing sheets if there are at least 2
+        sheet_origins.sort()
+        if len(sheet_origins) >= 2:
+            spacing = sheet_origins[1] - sheet_origins[0] - width
+
+        offset_x = max_right + spacing if max_right > 0 else 0.0
+
+        FreeCAD.Console.PrintMessage(
+            f"[Sheet Debug] Adding drop zone {sheet_group.Label}: "
+            f"max_right={max_right:.0f} spacing={spacing:.0f} offset_x={offset_x:.0f} "
+            f"origins={[f'{x:.0f}' for x in sheet_origins]}\n"
+        )
+
         # Add Boundary
         boundary = doc.addObject("Part::Feature", f"Sheet_Boundary_{index}")
-        # Use dimensions from existing sheets
         import Part
         boundary.Shape = Part.makePlane(width, height)
-        # Position it to the right of existing sheets if any (width + 10% gap)
-        offset_x = (index - 1) * (width * 1.1)
         boundary.Placement = FreeCAD.Placement(FreeCAD.Vector(offset_x, 0, 0), FreeCAD.Rotation())
         sheet_group.addObject(boundary)
 

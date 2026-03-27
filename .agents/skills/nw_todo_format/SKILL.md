@@ -9,6 +9,7 @@
 | `TASKS.md` | `T-NNN` | Code quality, tests, architecture |
 | `TODO.md` | `TASK-NNN` | Complex features with acceptance criteria |
 | `todo_manual.md` | `M-NNN` / `M-BNNN` | Manual nester enhancements / bug fixes |
+| `todo_code_review.md` | `CR-NNN` | Code review action items (string constants, refactoring) |
 
 ## TASKS.md Format (Atomic Tasks)
 
