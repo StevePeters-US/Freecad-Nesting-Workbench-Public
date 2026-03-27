@@ -408,8 +408,14 @@ class Nester:
                         if cache_key in Shape.nfp_cache:
                             continue
                     
-                    # Fire-and-forget: compute in background, result goes to cache
+                    # Fire-and-forget: compute in background, result goes to cache.
+                    # Dispatch to GPU or CPU path to match the engine configuration.
+                    nfp_fn = (
+                        self.engine._calculate_and_cache_nfp_gpu
+                        if self.engine.use_gpu
+                        else self.engine._calculate_and_cache_nfp
+                    )
                     self._precompute_pool.submit(
-                        self.engine._calculate_and_cache_nfp,
+                        nfp_fn,
                         placed.shape, 0.0, remaining, relative_angle, cache_key
                     )

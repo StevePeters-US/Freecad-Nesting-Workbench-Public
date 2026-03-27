@@ -36,8 +36,12 @@ class MinkowskiEngine:
         self.use_gpu = use_gpu and nfp_gpu_taichi and nfp_gpu_taichi.is_available() # Check availability
         self._log_lock = Lock()
         
-        if use_gpu and not self.use_gpu:
-             self.log("GPU acceleration requested but Taichi is not available. Falling back to CPU.")
+        if use_gpu:
+            if self.use_gpu:
+                backend = nfp_gpu_taichi.get_backend() if nfp_gpu_taichi else "unknown"
+                self.log(f"GPU acceleration enabled (Taichi backend: {backend}).")
+            else:
+                self.log("GPU acceleration requested but Taichi is not available or only has a CPU backend. Falling back to CPU.")
 
         self.bin_polygon = Polygon([(0, 0), (self.bin_width, 0), (self.bin_width, self.bin_height), (0, self.bin_height)])
 

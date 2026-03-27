@@ -9,25 +9,43 @@ try:
 except ImportError:
     TAICHI_AVAILABLE = False
 
+# Track which backend Taichi was actually initialized with.
+_taichi_arch = None  # e.g. 'vulkan', 'cuda', 'opengl', or 'cpu'
+
 if TAICHI_AVAILABLE:
-    # Initialize Taichi with Vulkan backend if available, fallback to others
-    # We use cpu fallback to avoid crashing if no GPU is found, but ideally we want gpu
-    try:
-        ti.init(arch=ti.vulkan)
-    except Exception:
+    # Initialize Taichi with Vulkan backend if available, fallback to others.
+    # We prefer a real GPU backend; CPU is a last resort.
+    for _arch_name, _arch in [
+        ("vulkan", ti.vulkan),
+        ("cuda", ti.cuda),
+        ("opengl", ti.opengl),
+        ("cpu", ti.cpu),
+    ]:
         try:
-            ti.init(arch=ti.cuda)
+            ti.init(arch=_arch)
+            _taichi_arch = _arch_name
+            break
         except Exception:
-             try:
-                ti.init(arch=ti.opengl)
-             except Exception:
-                ti.init(arch=ti.cpu)
+            continue
+
+    if _taichi_arch:
+        import FreeCAD
+        FreeCAD.Console.PrintMessage(
+            f"[nfp_gpu_taichi] Taichi initialized with backend: {_taichi_arch}\n"
+        )
+    else:
+        TAICHI_AVAILABLE = False
 
 # Global lock to prevent concurrent Taichi kernel launches from multiple threads.
 _kernel_lock = threading.Lock()
 
 def is_available():
-    return TAICHI_AVAILABLE
+    """Returns True only when Taichi is running on a real GPU backend."""
+    return TAICHI_AVAILABLE and _taichi_arch not in (None, "cpu")
+
+def get_backend():
+    """Returns the name of the active Taichi backend, or None if unavailable."""
+    return _taichi_arch if TAICHI_AVAILABLE else None
 
 if TAICHI_AVAILABLE:
     @ti.kernel

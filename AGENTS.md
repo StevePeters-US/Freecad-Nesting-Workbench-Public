@@ -185,6 +185,7 @@ Skills live in `.agents/skills/`. Each is a focused deep-dive on one topic.
 |-------|-------------|
 | `nw_nesting_pipeline` | Before touching any nesting orchestration code |
 | `nw_nfp_algorithm` | Before modifying NFP/Minkowski computation |
+| `nw_gpu_taichi` | Before modifying GPU kernels, `nfp_gpu_taichi.py`, or `minkowski_engine.py` GPU paths |
 | `nw_genetic_algorithm` | Before modifying GA loop, fitness, crossover, mutation |
 | `nw_manual_nester` | Before modifying manual drag/drop tool or physics |
 | `nw_input_manager` | Before modifying input events, keybindings, or action dispatch |
@@ -205,6 +206,7 @@ Skills live in `.agents/skills/`. Each is a focused deep-dive on one topic.
 | `TODO.md` | Complex features (TASK-NNN) | Feature specs with acceptance criteria |
 | `todo_manual.md` | Manual nester enhancements (M-NNN, M-BNNN) | Architecture + implementation code |
 | `todo_code_review.md` | Code review action items (CR-NNN) | String constants, refactoring, agent guidelines |
+| `todo_gpu.md` | GPU acceleration tasks (GPU-NNN) | Taichi kernel work, NFP pipeline GPU migration |
 | `completed/` | Archived completed tasks | Moved from active lists when done |
 
 When fixing a task: follow `.agents/workflows/fix-task.md`.
