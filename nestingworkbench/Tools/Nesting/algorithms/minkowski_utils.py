@@ -39,7 +39,7 @@ def decompose_if_needed(polygon, logger):
     # If already convex-ish (triangle or area match convex hull), return as is
     # Using a very strict tolerance for GPU kernel safety
     is_convex = False
-    if polygon.geom_type == 'Polygon':
+    if polygon.geom_type == 'Polygon' and not polygon.interiors:
         if len(polygon.exterior.coords) <= 4: # Triangle (4 coords including closure)
             is_convex = True
         elif math.isclose(polygon.area, polygon.convex_hull.area, rel_tol=1e-7):

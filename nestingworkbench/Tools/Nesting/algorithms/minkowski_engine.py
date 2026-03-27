@@ -79,6 +79,7 @@ class MinkowskiEngine:
             parts_to_process = sheet.parts[start_idx:target_idx]
 
         new_polys = []
+        new_convex_pieces = []
         part_to_place_master_label = part_to_place.source_freecad_object.Label
         
         for p in parts_to_process:
@@ -120,20 +121,31 @@ class MinkowskiEngine:
                 cent = p.shape.centroid
                 translated = translate(rotated, xoff=cent.x, yoff=cent.y)
                 new_polys.append(translated)
+                
+                # GPU-005: Collect pre-decomposed convex pieces
+                if self.use_gpu:
+                    pieces = nfp_data.get('convex_pieces')
+                    if not pieces: # Fallback for old cache entries
+                        pieces = minkowski_utils.decompose_if_needed(master, self.log)
+                    
+                    for piece in pieces:
+                        rot_piece = rotate(piece, placed_angle, origin=(0, 0))
+                        trans_piece = translate(rot_piece, xoff=cent.x, yoff=cent.y)
+                        new_convex_pieces.append(trans_piece)
         
         with sheet.nfp_cache_lock:
             if new_polys:
                 if self.use_gpu:
-                    # GPU-002: Use exact union for visualization, but keep individual hulls for GPU scoring
+                    # Update solid polygon for visualization/CPU compatibility
                     batch_union = unary_union(new_polys)
                     if entry['polygon'].is_empty:
                         entry['polygon'] = batch_union
                     else:
                         entry['polygon'] = entry['polygon'].union(batch_union)
-                    
+                        
                     if 'convex_pieces' not in entry:
                         entry['convex_pieces'] = []
-                    entry['convex_pieces'].extend(new_polys)
+                    entry['convex_pieces'].extend(new_convex_pieces)
                 else:
                     batch_union = unary_union(new_polys)
                     if entry['polygon'].is_empty:
@@ -389,16 +401,11 @@ class MinkowskiEngine:
                 
             valid_hulls = [h for h in hulls if h is not None]
             
-            # GPU-003: GPU Union (conservative approximation)
+            # GPU-004: Exact Union to preserve holes/concavities
             nfp_exterior_poly = None
             if valid_hulls:
                 t_u0 = time.perf_counter()
-                nfp_exterior_poly = nfp_gpu_taichi.union_convex_hulls_gpu(valid_hulls)
-                if nfp_exterior_poly is None:
-                    # Fallback to CPU
-                    if self.verbose:
-                        FreeCAD.Console.PrintLog("[MinkowskiEngine] GPU union fallback to CPU\n")
-                    nfp_exterior_poly = unary_union(valid_hulls)
+                nfp_exterior_poly = unary_union(valid_hulls)
                 dt_union = (time.perf_counter() - t_u0) * 1000
                 if self.verbose:
                     self.log(f"GPU NFP union: {dt_union:.1f}ms")
@@ -427,7 +434,16 @@ class MinkowskiEngine:
                             elif ifp.geom_type == 'MultiPolygon':
                                 for p in ifp.geoms: nfp_interiors.append(p.exterior)
             master_nfp = Polygon(nfp_exterior_poly.exterior, nfp_interiors) if nfp_exterior_poly else None
-            nfp_data = {"polygon": master_nfp} if master_nfp else {}
+            
+            # GPU-005: Decompose for GPU scoring (handles holes correctly)
+            convex_pieces = []
+            if master_nfp and not master_nfp.is_empty:
+                convex_pieces = minkowski_utils.decompose_if_needed(master_nfp, self.log)
+                
+            nfp_data = {
+                "polygon": master_nfp,
+                "convex_pieces": convex_pieces
+            } if master_nfp else {}
         except Exception as e:
             self.log(f"GPU NFP Error for {cache_key}: {e}. Falling back to CPU.")
             return self._calculate_and_cache_nfp(shape_A, angle_A, part_to_place, angle_B, cache_key)

@@ -5,6 +5,7 @@ import threading
 try:
     import taichi as ti
     import numpy as np
+    from shapely.ops import unary_union
     TAICHI_AVAILABLE = True
 except ImportError:
     TAICHI_AVAILABLE = False
