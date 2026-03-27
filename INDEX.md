@@ -21,7 +21,6 @@
 | `nesting_commands/command_export_sheets.py` | `Nesting_Export` | DXF export |
 | `nesting_commands/command_stack_sheets.py` | `Nesting_StackSheets` | Toggle sheet stacking |
 | `nesting_commands/command_transform_parts.py` | `Nesting_ManualNester` | Manual drag/drop tool |
-| `nesting_commands/command_install_dependencies.py` | `Nesting_InstallDependencies` | Install taichi GPU lib |
 
 ### Core Package — Data Types
 | File | Layer | Key Classes |
@@ -31,12 +30,13 @@
 | `nestingworkbench/datatypes/placed_part.py` | Data | `PlacedPart` — post-placement snapshot |
 | `nestingworkbench/datatypes/shape_object.py` | Data | `ShapeObject`, `ViewProviderShape` — scripted FreeCAD objects |
 | `nestingworkbench/datatypes/label_object.py` | Data | `LabelObject`, `ViewProviderLabel` — text labels |
+| `nestingworkbench/constants.py` | Data | Global property name and type constants |
 
 ### Core Package — Nesting Tool
 | File | Layer | Key Classes / Functions |
 |------|-------|----------------------|
 | `nestingworkbench/Tools/Nesting/ui_nesting.py` | UI | `NestingPanel` — Qt widget |
-| `nestingworkbench/Tools/Nesting/nesting_controller.py` | Tool | `NestingController` — orchestrator (1143 lines) |
+| `nestingworkbench/Tools/Nesting/nesting_controller.py` | Tool | `NestingController` — orchestrator (1164 lines) |
 | `nestingworkbench/Tools/Nesting/nesting_logic.py` | Tool | `nest()` entry point, visualization state |
 | `nestingworkbench/Tools/Nesting/layout_manager.py` | Tool | `Layout`, `LayoutManager` — GA population mgmt |
 | `nestingworkbench/Tools/Nesting/shape_preparer.py` | Tool | `ShapePreparer` — master shape creation |
@@ -125,6 +125,7 @@
 | Create or modify toolbar icons | `nw_icons` |
 | Write new task entries for any todo list | `nw_todo_format` |
 | Work with FreeCAD API (Placement, ViewObject) | `nw_freecad_patterns` |
+| Work on code review tasks from `todo_code_review.md` | `nw_code_review_tasks` |
 | Add logging | `logging` |
 
 ---

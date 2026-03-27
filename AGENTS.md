@@ -66,7 +66,7 @@ UI Panel → NestingController → ShapePreparer → (master shapes)
 | `Shape` | `datatypes/shape.py` | Shapely polygon + FreeCAD object wrapper |
 | `Sheet` | `datatypes/sheet.py` | Placed-parts list, drawing, fill-% calc |
 | `PlacedPart` | `datatypes/placed_part.py` | Post-placement snapshot |
-| `ManualNesterTool` | `Tools/ManualNester/manual_nester_tool.py` | Mouse event handler for manual drag/drop |
+| `ManualNesterToolObserver` | `Tools/ManualNester/manual_nester_tool.py` | Mouse event handler for manual drag/drop |
 | `PhysicsEngine` | `Tools/ManualNester/physics_engine.py` | Proximity-based part repulsion |
 | `CollisionResolver` | `Tools/ManualNester/collision_resolver.py` | BoundBox overlap resolution |
 
@@ -180,6 +180,7 @@ Skills live in `.agents/skills/`. Each is a focused deep-dive on one topic.
 | `nw_nfp_algorithm` | Before modifying NFP/Minkowski computation |
 | `nw_genetic_algorithm` | Before modifying GA loop, fitness, crossover, mutation |
 | `nw_manual_nester` | Before modifying manual drag/drop tool or physics |
+| `nw_input_manager` | Before modifying input events, keybindings, or action dispatch |
 | `nw_shape_datatypes` | Before modifying Shape, Sheet, or PlacedPart classes |
 | `nw_icons` | Before creating or modifying toolbar icons |
 | `nw_todo_format` | Before writing new task entries |

@@ -163,13 +163,10 @@ class ManualNesterToolObserver:
             if child.isDerivedFrom("App::DocumentObjectGroup") and child.Label.startswith("Sheet_"):
                 b = next((obj for obj in child.Group if obj.Label.startswith("Sheet_Boundary_")), None)
                 if b and hasattr(b, "Shape"):
-                    bb = b.Shape.BoundBox
-                    bp = b.Placement.Base
+                    bb = b.Shape.BoundBox  # already world coords
                     FreeCAD.Console.PrintMessage(
                         f"[Sheet Debug] {child.Label}: "
-                        f"local_bb=({bb.XMin:.0f},{bb.YMin:.0f})-({bb.XMax:.0f},{bb.YMax:.0f}) "
-                        f"placement=({bp.x:.0f},{bp.y:.0f}) "
-                        f"global=({bb.XMin+bp.x:.0f},{bb.YMin+bp.y:.0f})-({bb.XMax+bp.x:.0f},{bb.YMax+bp.y:.0f})\n"
+                        f"world=({bb.XMin:.0f},{bb.YMin:.0f})-({bb.XMax:.0f},{bb.YMax:.0f})\n"
                     )
 
         for sheet_group in self.layout_group.Group:
@@ -534,13 +531,8 @@ class ManualNesterToolObserver:
         boundary = next((c for c in clamp_sheet.Group if c.Label.startswith("Sheet_Boundary_")), None)
         if not boundary or not hasattr(boundary, "Shape") or not hasattr(boundary.Shape, "BoundBox"):
             return
-        s_bb = boundary.Shape.BoundBox
-        s_pos = boundary.Placement.Base
-        global_sheet_bb = FreeCAD.BoundBox(
-            s_bb.XMin + s_pos.x, s_bb.YMin + s_pos.y, s_bb.ZMin,
-            s_bb.XMax + s_pos.x, s_bb.YMax + s_pos.y, s_bb.ZMax
-        )
-        self.collision_resolver.clamp_to_sheet(self.selected_obj, global_sheet_bb)
+        # Shape.BoundBox already includes placement (world coords)
+        self.collision_resolver.clamp_to_sheet(self.selected_obj, boundary.Shape.BoundBox)
 
     def _apply_physics(self, drag_delta):
         """Push nearby parts based on proximity to the dragged part."""
@@ -594,13 +586,8 @@ class ManualNesterToolObserver:
                 if sheet_group:
                     boundary = next((c for c in sheet_group.Group if c.Label.startswith("Sheet_Boundary_")), None)
                     if boundary and hasattr(boundary, "Shape") and hasattr(boundary.Shape, "BoundBox"):
-                        s_bb = boundary.Shape.BoundBox
-                        s_pos = boundary.Placement.Base
-                        global_sheet_bb = FreeCAD.BoundBox(
-                            s_bb.XMin + s_pos.x, s_bb.YMin + s_pos.y, s_bb.ZMin,
-                            s_bb.XMax + s_pos.x, s_bb.YMax + s_pos.y, s_bb.ZMax
-                        )
-                        if self.collision_resolver.clamp_to_sheet(obj, global_sheet_bb):
+                        # Shape.BoundBox already includes placement (world coords)
+                        if self.collision_resolver.clamp_to_sheet(obj, boundary.Shape.BoundBox):
                              any_moved = True
 
                 # C. Separate from neighbors (Symmetric push)
@@ -941,20 +928,10 @@ class ManualNesterToolObserver:
                 # Check boundary
                 boundary = next((obj for obj in sheet_group.Group if obj.Label.startswith("Sheet_Boundary_")), None)
                 if boundary:
+                    # Shape.BoundBox already includes placement (world coords)
                     bb = boundary.Shape.BoundBox
-                    bp = boundary.Placement.Base
-                    gx_min = bb.XMin + bp.x
-                    gx_max = bb.XMax + bp.x
-                    gy_min = bb.YMin + bp.y
-                    gy_max = bb.YMax + bp.y
-                    hit = (pos.x >= gx_min and pos.x <= gx_max and
-                           pos.y >= gy_min and pos.y <= gy_max)
-                    FreeCAD.Console.PrintMessage(
-                        f"[FindSheet] {sheet_group.Label}: "
-                        f"global=({gx_min:.0f},{gy_min:.0f})-({gx_max:.0f},{gy_max:.0f}) "
-                        f"pos=({pos.x:.0f},{pos.y:.0f}) hit={hit}\n"
-                    )
-                    if hit:
+                    if (pos.x >= bb.XMin and pos.x <= bb.XMax and
+                            pos.y >= bb.YMin and pos.y <= bb.YMax):
                         return sheet_group
         return None
 
