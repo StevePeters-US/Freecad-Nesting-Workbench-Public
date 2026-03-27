@@ -163,7 +163,7 @@ class NestingPanel(QtGui.QWidget):
         self.use_gpu_checkbox.setToolTip("Uses Vector-based GPU acceleration (Taichi) for NFP calculation. Requires 'taichi' library.")
         gpu_layout.addWidget(self.use_gpu_checkbox)
         
-        self.install_taichi_button = QtGui.QPushButton("Install Taichi")
+        self.install_taichi_button = QtGui.QPushButton("Install Dependencies")
         self.install_taichi_button.setToolTip("Installs 'taichi' library to the current Python environment.")
         self.install_taichi_button.setMaximumWidth(100)
         gpu_layout.addWidget(self.install_taichi_button)
@@ -310,7 +310,7 @@ class NestingPanel(QtGui.QWidget):
             try:
                 import taichi
                 self.install_taichi_button.setEnabled(False)
-                self.install_taichi_button.setText("Installed")
+                self.install_taichi_button.setText("Dependencies Installed")
             except ImportError:
                 self.install_taichi_button.setEnabled(True)
         

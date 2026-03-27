@@ -158,17 +158,6 @@ class ManualNesterToolObserver:
 
     def _track_layout_objects(self):
         """Walks the layout group and tracks all parts."""
-        # Debug: log all sheet boundaries at startup
-        for child in self.layout_group.Group:
-            if child.isDerivedFrom("App::DocumentObjectGroup") and child.Label.startswith("Sheet_"):
-                b = next((obj for obj in child.Group if obj.Label.startswith("Sheet_Boundary_")), None)
-                if b and hasattr(b, "Shape"):
-                    bb = b.Shape.BoundBox  # already world coords
-                    FreeCAD.Console.PrintMessage(
-                        f"[Sheet Debug] {child.Label}: "
-                        f"world=({bb.XMin:.0f},{bb.YMin:.0f})-({bb.XMax:.0f},{bb.YMax:.0f})\n"
-                    )
-
         for sheet_group in self.layout_group.Group:
             if sheet_group.isDerivedFrom("App::DocumentObjectGroup") and sheet_group.Label.startswith("Sheet_"):
                 # Ensure sheet boundary is visible
@@ -201,9 +190,6 @@ class ManualNesterToolObserver:
                     for obj in sheet_group.Group:
                         if obj.TypeId == "App::Part" and obj.Label.startswith("nested_"):
                             self._track_single_object(obj, sheet_group)
-                            FreeCAD.Console.PrintMessage(
-                                f"[Track] Fallback: tracking {obj.Label} directly under {sheet_group.Label}\n"
-                            )
 
                 # Make existing sheet boundary unselectable
                 if sheet_boundary and hasattr(sheet_boundary, "ViewObject"):
@@ -1011,11 +997,7 @@ class ManualNesterToolObserver:
 
         offset_x = max_right + spacing if max_right > 0 else 0.0
 
-        FreeCAD.Console.PrintMessage(
-            f"[Sheet Debug] Adding drop zone {sheet_group.Label}: "
-            f"max_right={max_right:.0f} spacing={spacing:.0f} offset_x={offset_x:.0f} "
-            f"origins={[f'{x:.0f}' for x in sheet_origins]}\n"
-        )
+
 
         # Add Boundary
         boundary = doc.addObject("Part::Feature", f"Sheet_Boundary_{index}")

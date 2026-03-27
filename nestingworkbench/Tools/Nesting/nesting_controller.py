@@ -900,7 +900,7 @@ class NestingController:
         
         reply = QtGui.QMessageBox.question(
             self.ui, 
-            "Install Taichi?", 
+            "Install Dependencies?", 
             "This will attempt to install the 'taichi' library using pip.\n\n"
             "This may take a moment and requires an internet connection.\n"
             "FreeCAD might need to be restarted afterwards.\n\n"
@@ -912,7 +912,7 @@ class NestingController:
             return
 
         try:
-            self.ui.status_label.setText("Installing Taichi...")
+            self.ui.status_label.setText("Installing Dependencies...")
             if hasattr(self.ui, 'install_taichi_button'):
                 self.ui.install_taichi_button.setEnabled(False)
             QtGui.QApplication.processEvents()
@@ -931,19 +931,19 @@ class NestingController:
             # Use --no-warn-script-location to avoid warnings about PATH
             subprocess.check_call([python_exe, "-m", "pip", "install", "taichi", "--no-warn-script-location"])
             
-            FreeCAD.Console.PrintMessage("Successfully installed taichi.\n")
-            self.ui.status_label.setText("Taichi Installed!")
+            FreeCAD.Console.PrintMessage("Successfully installed dependencies.\n")
+            self.ui.status_label.setText("Dependencies Installed!")
             if hasattr(self.ui, 'install_taichi_button'):
-                self.ui.install_taichi_button.setText("Installed")
+                self.ui.install_taichi_button.setText("Dependencies Installed")
             
-            QtGui.QMessageBox.information(self.ui, "Success", "Taichi installed successfully!\nPlease restart FreeCAD to ensure it loads correctly.")
+            QtGui.QMessageBox.information(self.ui, "Success", "Dependencies installed successfully!\nPlease restart FreeCAD to ensure they load correctly.")
             
         except subprocess.CalledProcessError as e:
-            FreeCAD.Console.PrintError(f"Failed to install taichi: {e}\n")
+            FreeCAD.Console.PrintError(f"Failed to install dependencies: {e}\n")
             self.ui.status_label.setText("Installation Failed")
             if hasattr(self.ui, 'install_taichi_button'):
                 self.ui.install_taichi_button.setEnabled(True)
-            QtGui.QMessageBox.critical(self.ui, "Error", f"Failed to install taichi.\nCheck the Report View for details.\n\nError: {e}")
+            QtGui.QMessageBox.critical(self.ui, "Error", f"Failed to install dependencies.\nCheck the Report View for details.\n\nError: {e}")
         except Exception as e:
             FreeCAD.Console.PrintError(f"Error installing taichi: {e}\n")
             self.ui.status_label.setText("Error")
