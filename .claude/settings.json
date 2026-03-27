@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(python -m pytest tests/test_physics_engine.py -v)",
-      "Bash(python -m pytest tests/ -v)"
+      "Bash(python -m pytest tests/ -v)",
+      "Bash(python -m pytest tests/test_collision_resolver.py -v)",
+      "Bash(python -m pytest tests/test_collision_resolver.py -q)"
     ]
   }
 }

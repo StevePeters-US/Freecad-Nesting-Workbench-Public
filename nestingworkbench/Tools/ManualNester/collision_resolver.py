@@ -151,8 +151,13 @@ class CollisionResolver:
     def _find_bbox_with_placement(self, obj, parent_placement):
         """Returns (accumulated_placement, local_BoundBox) or (None, None).
 
-        Walks BoundaryObject -> Shape -> Group children, accumulating
+        Walks BoundaryObject -> Group children -> Shape, accumulating
         placements so the caller can apply the full transform.
+
+        IMPORTANT: Group recursion is checked BEFORE raw Shape because
+        App::Part.Shape returns a compound in global coordinates (already
+        includes the container's Placement).  Using it with _transform_bbox
+        would double-apply the placement, causing mirror/drift on clamp.
         """
         if parent_placement is None:
             current = obj.Placement
@@ -164,16 +169,17 @@ class CollisionResolver:
             full = current.multiply(obj.BoundaryObject.Placement)
             return full, obj.BoundaryObject.Shape.BoundBox
 
-        # 2. Check for raw Shape
-        if hasattr(obj, "Shape") and hasattr(obj.Shape, "BoundBox"):
-            return current, obj.Shape.BoundBox
-
-        # 3. Recurse into App::Part containers
+        # 2. Recurse into App::Part / container groups BEFORE raw Shape,
+        #    because container.Shape is a global compound (double-transform bug).
         if hasattr(obj, "Group"):
             for child in obj.Group:
                 result_placement, result_bb = self._find_bbox_with_placement(child, current)
                 if result_bb:
                     return result_placement, result_bb
+
+        # 3. Fallback: raw Shape (only reached for leaf Part::Feature objects)
+        if hasattr(obj, "Shape") and hasattr(obj.Shape, "BoundBox"):
+            return current, obj.Shape.BoundBox
 
         return None, None
 

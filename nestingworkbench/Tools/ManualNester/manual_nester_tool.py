@@ -205,26 +205,9 @@ class ManualNesterToolObserver:
         if hasattr(obj, "ViewObject"):
             self.original_visibilities[obj] = obj.ViewObject.Visibility
 
-            # Manage visibility of linked objects (BoundaryObject and LabelObject)
-            replacement_shown = False
-            if hasattr(obj, "BoundaryObject") and obj.BoundaryObject and hasattr(obj.BoundaryObject, "ViewObject"):
-                self.original_visibilities[obj.BoundaryObject] = obj.BoundaryObject.ViewObject.Visibility
-                obj.BoundaryObject.ViewObject.Visibility = True # Always show bounds in manual nester mode
-                replacement_shown = True
-            if hasattr(obj, "LabelObject") and obj.LabelObject and hasattr(obj.LabelObject, "ViewObject"):
-                self.original_visibilities[obj.LabelObject] = obj.LabelObject.ViewObject.Visibility
-                obj.LabelObject.ViewObject.Visibility = True # Always show label in manual nester mode
-                replacement_shown = True
-
-            # Hide the original 3D shape if we are showing a replacement
-            if replacement_shown:
-                obj.ViewObject.Visibility = False
-
-            # Make sure sheets are UNSELECTABLE to prevent selection interference
-            # (Handled in pick_object filtering too, but this helps the native draggers)
-            if hasattr(obj, "ViewObject"):
-                if hasattr(obj.ViewObject, "Selectable"):
-                    obj.ViewObject.Selectable = True # Ensure parts ARE selectable
+            # Make sure parts ARE selectable
+            if hasattr(obj.ViewObject, "Selectable"):
+                obj.ViewObject.Selectable = True
 
     # ------------------------------------------------------------------
     # Input action handlers (registered with InputManager)
@@ -319,13 +302,19 @@ class ManualNesterToolObserver:
             new_placement.Base = new_pos
             self.selected_obj.Placement = new_placement
 
+            # Clamp the dragged part to whichever sheet the cursor is over.
+            # If cursor is between sheets, fall back to the part's current sheet.
+            self._clamp_dragged_to_cursor_sheet(current_pos)
+
             if drag_delta.Length > 0.001:
                 self._apply_physics(drag_delta)
+
+            actual_pos = self.selected_obj.Placement.Base
 
             # M-010: Show radius indicator at the part's ACTUAL position
             # (may differ from new_pos if clamping moved it)
             if self.physics_enabled:
-                self._show_radius_indicator(self.selected_obj.Placement.Base, self.physics_engine.radius)
+                self._show_radius_indicator(actual_pos, self.physics_engine.radius)
             else:
                 self._hide_radius_indicator()
 
@@ -381,8 +370,23 @@ class ManualNesterToolObserver:
                 if target_sheet_group:
                     shapes_group = next((c for c in target_sheet_group.Group if c.Label.startswith("Shapes_")), None)
                     if shapes_group:
-                        QtCore.QTimer.singleShot(0, lambda g=shapes_group.Name, o=self.selected_obj.Name: self._deferred_add_object_to_group(g, o))
-                        FreeCAD.Console.PrintMessage("Manual Nester: Deferred drop onto sheet.\n")
+                        # Capture old sheet for cross-sheet re-parenting
+                        old_sheet = self.obj_to_sheet.get(self.selected_obj)
+                        old_shapes_name = None
+                        if old_sheet and old_sheet != target_sheet_group:
+                            old_shapes = next((c for c in old_sheet.Group if c.Label.startswith("Shapes_")), None)
+                            if old_shapes:
+                                old_shapes_name = old_shapes.Name
+                        QtCore.QTimer.singleShot(0, lambda g=shapes_group.Name, o=self.selected_obj.Name, old=old_shapes_name: self._deferred_move_object_to_sheet(g, o, old))
+                        # Update obj_to_sheet mapping immediately
+                        self.obj_to_sheet[self.selected_obj] = target_sheet_group
+                        if old_sheet and old_sheet != target_sheet_group:
+                            FreeCAD.Console.PrintMessage(
+                                f"Manual Nester: Moved {self.selected_obj.Label} "
+                                f"from {old_sheet.Label} to {target_sheet_group.Label}.\n"
+                            )
+                        else:
+                            FreeCAD.Console.PrintMessage("Manual Nester: Deferred drop onto sheet.\n")
                 else:
                     if self.selected_obj in self.new_objects:
                         QtCore.QTimer.singleShot(0, lambda o=self.selected_obj.Name: self._deferred_revert_single_object(o))
@@ -449,6 +453,25 @@ class ManualNesterToolObserver:
         except Exception as e:
             FreeCAD.Console.PrintWarning(f"[ManualNesterTool] Deferred add failed: {e}\n")
 
+    def _deferred_move_object_to_sheet(self, target_shapes_name, obj_name, old_shapes_name):
+        """Move an object from one sheet's Shapes_ group to another."""
+        try:
+            doc = FreeCAD.ActiveDocument
+            if self.layout_group and hasattr(self.layout_group, 'Document'):
+                doc = self.layout_group.Document
+            if doc:
+                target_grp = doc.getObject(target_shapes_name)
+                obj = doc.getObject(obj_name)
+                if target_grp and obj:
+                    # Remove from old group first (if cross-sheet move)
+                    if old_shapes_name:
+                        old_grp = doc.getObject(old_shapes_name)
+                        if old_grp:
+                            old_grp.removeObject(obj)
+                    target_grp.addObject(obj)
+        except Exception as e:
+            FreeCAD.Console.PrintWarning(f"[ManualNesterTool] Deferred sheet move failed: {e}\n")
+
     def _deferred_revert_single_object(self, obj_name):
         try:
             doc = FreeCAD.ActiveDocument
@@ -466,6 +489,29 @@ class ManualNesterToolObserver:
     # ------------------------------------------------------------------
     # Physics
     # ------------------------------------------------------------------
+
+    def _clamp_dragged_to_cursor_sheet(self, cursor_world_pos):
+        """Clamp the dragged part to the sheet the cursor is over.
+
+        If the cursor is over a different sheet, the part jumps to that sheet's
+        boundaries (enabling cross-sheet dragging).  If the cursor is in the
+        gap between sheets, fall back to the part's current sheet.
+        """
+        clamp_sheet = self._find_sheet_at_pos(cursor_world_pos)
+        if not clamp_sheet:
+            clamp_sheet = self.obj_to_sheet.get(self.selected_obj)
+        if not clamp_sheet:
+            return
+        boundary = next((c for c in clamp_sheet.Group if c.Label.startswith("Sheet_Boundary_")), None)
+        if not boundary or not hasattr(boundary, "Shape") or not hasattr(boundary.Shape, "BoundBox"):
+            return
+        s_bb = boundary.Shape.BoundBox
+        s_pos = boundary.Placement.Base
+        global_sheet_bb = FreeCAD.BoundBox(
+            s_bb.XMin + s_pos.x, s_bb.YMin + s_pos.y, s_bb.ZMin,
+            s_bb.XMax + s_pos.x, s_bb.YMax + s_pos.y, s_bb.ZMax
+        )
+        self.collision_resolver.clamp_to_sheet(self.selected_obj, global_sheet_bb)
 
     def _apply_physics(self, drag_delta):
         """Push nearby parts based on proximity to the dragged part."""
@@ -503,20 +549,7 @@ class ManualNesterToolObserver:
                 obj.Placement = pl
                 displaced_objs.append(obj)
 
-        # 2. Clamp the DRAGGED part to its sheet boundary
-        dragged_sheet = self.obj_to_sheet.get(self.selected_obj)
-        if dragged_sheet:
-            boundary = next((c for c in dragged_sheet.Group if c.Label.startswith("Sheet_Boundary_")), None)
-            if boundary and hasattr(boundary, "Shape") and hasattr(boundary.Shape, "BoundBox"):
-                s_bb = boundary.Shape.BoundBox
-                s_pos = boundary.Placement.Base
-                global_sheet_bb = FreeCAD.BoundBox(
-                    s_bb.XMin + s_pos.x, s_bb.YMin + s_pos.y, s_bb.ZMin,
-                    s_bb.XMax + s_pos.x, s_bb.YMax + s_pos.y, s_bb.ZMax
-                )
-                self.collision_resolver.clamp_to_sheet(self.selected_obj, global_sheet_bb)
-
-        # 3. Iteratively resolve all collisions in the layout to create chain reaction (Relaxation)
+        # Iteratively resolve all collisions in the layout to create chain reaction (Relaxation)
         all_tracked = [o for o in self.original_placements if o != self.selected_obj]
 
         for _ in range(3):
@@ -554,6 +587,11 @@ class ManualNesterToolObserver:
         Transforms local BoundBox corners through the full placement (including
         rotation) so that the returned axis-aligned BoundBox is correct even for
         rotated parts.
+
+        IMPORTANT: Group recursion is checked BEFORE raw Shape because
+        App::Part.Shape returns a compound in global coordinates (already
+        includes the container's Placement).  Using it with _transform_bbox
+        would double-apply the placement, causing mirror/drift on clamp.
         """
         # Accumulate placement through the hierarchy
         if parent_placement is None:
@@ -568,17 +606,18 @@ class ManualNesterToolObserver:
             full_placement = current_placement.multiply(obj.BoundaryObject.Placement)
             return self._transform_bbox(bb, full_placement)
 
-        # 2. Check for raw Shape
-        if hasattr(obj, "Shape") and hasattr(obj.Shape, "BoundBox"):
-            bb = obj.Shape.BoundBox
-            return self._transform_bbox(bb, current_placement)
-
-        # 3. Recurse into App::Part containers
+        # 2. Recurse into App::Part / container groups BEFORE raw Shape,
+        #    because container.Shape is a global compound (double-transform bug).
         if hasattr(obj, "Group"):
             for child in obj.Group:
                 result = self._get_shape_bbox(child, current_placement)
                 if result:
                     return result
+
+        # 3. Fallback: raw Shape (only reached for leaf Part::Feature objects)
+        if hasattr(obj, "Shape") and hasattr(obj.Shape, "BoundBox"):
+            bb = obj.Shape.BoundBox
+            return self._transform_bbox(bb, current_placement)
 
         # 4. Strictly no bounds: One-time debug warning
         if obj.Name not in self.warned_missing_bounds:

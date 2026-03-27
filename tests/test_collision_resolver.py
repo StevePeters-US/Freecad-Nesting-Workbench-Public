@@ -35,6 +35,14 @@ class MockPlacement:
     def __init__(self, base):
         self.Base = base
 
+    def multiply(self, other):
+        """Non-rotated multiply: just add translations."""
+        return MockPlacement(self.Base + other.Base)
+
+    def multVec(self, vec):
+        """Non-rotated transform: just translate."""
+        return vec + self.Base
+
 class MockShape:
     def __init__(self, bbox):
         self.BoundBox = bbox
