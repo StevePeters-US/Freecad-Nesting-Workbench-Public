@@ -406,6 +406,7 @@ if TAICHI_AVAILABLE:
     def compute_batch_pip(points_np, convex_polys):
         """
         Efficiently check if a list of points are inside ANY of the provided convex polygons.
+        Returns a numpy array of 1s (inside) and 0s (outside).
         """
         if not points_np.any() or not convex_polys:
             return np.zeros(len(points_np), dtype=np.int32)
@@ -436,6 +437,28 @@ if TAICHI_AVAILABLE:
             )
             
         return results_np
+
+    def compute_batch_pip_with_holes(points_np, solid_polys, hole_polys):
+        """
+        Check if points are inside SOLID polygons AND NOT inside any HOLE polygons.
+        Provides exact NFP collision scoring without any CPU-side union.
+        """
+        if not points_np.any():
+            return np.zeros(len(points_np), dtype=np.int32)
+            
+        # 1. Check solids
+        solid_results = compute_batch_pip(points_np, solid_polys)
+        if not np.any(solid_results == 1):
+            return solid_results # All 0
+            
+        # 2. Check holes (only for points that hit a solid)
+        if not hole_polys:
+            return solid_results
+            
+        hole_results = compute_batch_pip(points_np, hole_polys)
+        
+        # 3. Collision iff (Inside Solid) AND (NOT Inside Hole)
+        return solid_results & ~hole_results
 
 
     def compute_nfp_pairs(pairs):

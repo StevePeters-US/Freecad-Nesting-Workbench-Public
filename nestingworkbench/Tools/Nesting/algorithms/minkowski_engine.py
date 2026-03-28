@@ -65,11 +65,12 @@ class MinkowskiEngine:
         with sheet.nfp_cache_lock:
             if cache_key not in sheet.nfp_cache:
                 sheet.nfp_cache[cache_key] = {
-                    'polygon': Polygon(), # Start empty
+                    'polygon': Polygon(), 
                     'last_part_idx': 0,
                     'points': [],
                     'prepared': None,
-                    'convex_pieces': [] # GPU-002: Store individual pieces
+                    'shells': [],      # GPU-007: Store individual solid pieces
+                    'holes': []        # GPU-007: Store individual hole pieces
                 }
             entry = sheet.nfp_cache[cache_key]
             target_idx = len(sheet.parts)
@@ -78,8 +79,7 @@ class MinkowskiEngine:
             start_idx = entry['last_part_idx']
             parts_to_process = sheet.parts[start_idx:target_idx]
 
-        new_polys = []
-        new_convex_pieces = []
+        new_points = []
         part_to_place_master_label = part_to_place.source_freecad_object.Label
         
         for p in parts_to_process:
@@ -111,60 +111,70 @@ class MinkowskiEngine:
                         p.shape, 0.0, part_to_place, relative_angle, nfp_cache_key
                     )
             
-            if nfp_data and nfp_data.get('error'):
+            if not nfp_data: continue
+            if nfp_data.get('error'):
                 self.log(f"Skipping rotation due to NFP error: {nfp_data['error']}")
                 return None
 
-            if nfp_data and nfp_data.get('polygon'):
-                master = nfp_data['polygon']
-                rotated = rotate(master, placed_angle, origin=(0, 0))
-                cent = p.shape.centroid
-                translated = translate(rotated, xoff=cent.x, yoff=cent.y)
-                new_polys.append(translated)
+            cent = p.shape.centroid
+            
+            if self.use_gpu:
+                # GPU Path: Collect all shell/hole pieces for scoring (No-Union)
+                shells = nfp_data.get('shells', [])
+                # Fallback for old cache entries
+                if not shells and 'convex_pieces' in nfp_data: shells = nfp_data['convex_pieces']
                 
-                # GPU-005: Collect pre-decomposed convex pieces
-                if self.use_gpu:
-                    pieces = nfp_data.get('convex_pieces')
-                    if not pieces: # Fallback for old cache entries
-                        pieces = minkowski_utils.decompose_if_needed(master, self.log)
+                for piece in shells:
+                    rotated = rotate(piece, placed_angle, origin=(0, 0))
+                    translated = translate(rotated, xoff=cent.x, yoff=cent.y)
+                    entry['shells'].append(translated)
                     
-                    for piece in pieces:
-                        rot_piece = rotate(piece, placed_angle, origin=(0, 0))
-                        trans_piece = translate(rot_piece, xoff=cent.x, yoff=cent.y)
-                        new_convex_pieces.append(trans_piece)
+                holes = nfp_data.get('holes', [])
+                for piece in holes:
+                    rotated = rotate(piece, placed_angle, origin=(0, 0))
+                    translated = translate(rotated, xoff=cent.x, yoff=cent.y)
+                    entry['holes'].append(translated)
+
+                # Candidate Points: Discretize the part-pair NFP boundary (optimized)
+                master = nfp_data.get('polygon')
+                if master and not master.is_empty:
+                    rotated = rotate(master, placed_angle, origin=(0, 0))
+                    translated = translate(rotated, xoff=cent.x, yoff=cent.y)
+                    
+                    # Discretize for candidate points
+                    new_points.extend(self._discretize_edge(translated.exterior))
+                    for interior in translated.interiors:
+                        new_points.extend(self._discretize_edge(interior))
+                        
+                    # Best-effort union for global visualization ONLY
+                    try:
+                        if entry['polygon'].is_empty:
+                            entry['polygon'] = translated
+                        else:
+                            entry['polygon'] = entry['polygon'].union(translated)
+                    except Exception: pass
+                else:
+                    # Fallback: if no union polygon exists, discretize individual shells (slower but safe)
+                    for piece in entry['shells'][-len(shells):]:
+                        new_points.extend(self._discretize_edge(piece.exterior))
+            else:
+                # CPU Path
+                master = nfp_data.get('polygon')
+                if not master: continue
+                rotated = rotate(master, placed_angle, origin=(0, 0))
+                translated = translate(rotated, xoff=cent.x, yoff=cent.y)
+                if entry['polygon'].is_empty:
+                    entry['polygon'] = translated
+                else:
+                    entry['polygon'] = entry['polygon'].union(translated)
+                # Discretize
+                new_points.extend(self._discretize_edge(translated.exterior))
+                for interior in translated.interiors:
+                    new_points.extend(self._discretize_edge(interior))
         
         with sheet.nfp_cache_lock:
-            if new_polys:
-                if self.use_gpu:
-                    # Update solid polygon for visualization/CPU compatibility
-                    batch_union = unary_union(new_polys)
-                    if entry['polygon'].is_empty:
-                        entry['polygon'] = batch_union
-                    else:
-                        entry['polygon'] = entry['polygon'].union(batch_union)
-                        
-                    if 'convex_pieces' not in entry:
-                        entry['convex_pieces'] = []
-                    entry['convex_pieces'].extend(new_convex_pieces)
-                else:
-                    batch_union = unary_union(new_polys)
-                    if entry['polygon'].is_empty:
-                        entry['polygon'] = batch_union
-                    else:
-                        entry['polygon'] = entry['polygon'].union(batch_union)
-
-                if not entry['polygon'].is_valid:
-                    entry['polygon'] = entry['polygon'].buffer(0)
-
-                points = []
-                if not entry['polygon'].is_empty:
-                    polys = [entry['polygon']] if entry['polygon'].geom_type == 'Polygon' else entry['polygon'].geoms
-                    for poly in polys:
-                         if poly.geom_type == 'Polygon':
-                             points.extend(self._discretize_edge(poly.exterior))
-                             for interior in poly.interiors:
-                                 points.extend(self._discretize_edge(interior))
-                entry['points'] = points
+            if new_points:
+                entry['points'].extend(new_points)
                 entry['prepared'] = None
             entry['last_part_idx'] = target_idx
         return entry
@@ -400,21 +410,13 @@ class MinkowskiEngine:
                 self.log(f"GPU NFP pairs ({len(pairs)} pairs): {dt_gpu:.1f}ms")
                 
             valid_hulls = [h for h in hulls if h is not None]
+            if not valid_hulls: return None
             
-            # GPU-004: Exact Union to preserve holes/concavities
-            nfp_exterior_poly = None
-            if valid_hulls:
-                t_u0 = time.perf_counter()
-                nfp_exterior_poly = unary_union(valid_hulls)
-                dt_union = (time.perf_counter() - t_u0) * 1000
-                if self.verbose:
-                    self.log(f"GPU NFP union: {dt_union:.1f}ms")
-
-            if nfp_exterior_poly and not nfp_exterior_poly.is_valid: 
-                nfp_exterior_poly = nfp_exterior_poly.buffer(0)
-            if not nfp_exterior_poly or nfp_exterior_poly.is_empty: return None
-
-            nfp_interiors = []
+            # GPU-007: No-Union data structure
+            nfp_shells = valid_hulls
+            nfp_holes = []
+            
+            # Calculate IFP for holes (if any)
             if shape_A.original_polygon.interiors:
                 mB = part_to_place.original_polygon
                 cB = mB.centroid
@@ -425,28 +427,35 @@ class MinkowskiEngine:
                 A_centered = translate(mA, -cA.x, -cA.y)
                 for hole in A_centered.interiors:
                     hole_poly = Polygon(hole.coords)
+                    # Check if B can even fit in this hole's bounding box
                     if (B_rot.bounds[2] - B_rot.bounds[0] < hole_poly.bounds[2] - hole_poly.bounds[0] and
                         B_rot.bounds[3] - B_rot.bounds[1] < hole_poly.bounds[3] - hole_poly.bounds[1] and
                         B_rot.area < hole_poly.area):
                         ifp = minkowski_utils.calculate_inner_fit_polygon(hole_poly, 0, B_centered, angle_B, self.log)
                         if ifp and not ifp.is_empty:
-                            if ifp.geom_type == 'Polygon': nfp_interiors.append(ifp.exterior)
-                            elif ifp.geom_type == 'MultiPolygon':
-                                for p in ifp.geoms: nfp_interiors.append(p.exterior)
-            master_nfp = Polygon(nfp_exterior_poly.exterior, nfp_interiors) if nfp_exterior_poly else None
+                            # Decompose IFP into convex pieces for GPU PIP
+                            hole_decomposed = minkowski_utils.decompose_if_needed(ifp, self.log)
+                            nfp_holes.extend(hole_decomposed)
             
-            # GPU-005: Decompose for GPU scoring (handles holes correctly)
-            convex_pieces = []
-            if master_nfp and not master_nfp.is_empty:
-                convex_pieces = minkowski_utils.decompose_if_needed(master_nfp, self.log)
+            # Best-effort union for visualization ONLY
+            master_nfp = None
+            try:
+                # Use a small buffer to avoid GEOS topology errors
+                hulls_buffered = [h.buffer(1e-7) for h in valid_hulls]
+                nfp_exterior_poly = unary_union(hulls_buffered)
+                if nfp_exterior_poly and not nfp_exterior_poly.is_empty:
+                    master_nfp = nfp_exterior_poly
+            except Exception: pass
                 
             nfp_data = {
-                "polygon": master_nfp,
-                "convex_pieces": convex_pieces
-            } if master_nfp else {}
+                "shells": nfp_shells,
+                "holes": nfp_holes,
+                "polygon": master_nfp
+            }
         except Exception as e:
             self.log(f"GPU NFP Error for {cache_key}: {e}. Falling back to CPU.")
             return self._calculate_and_cache_nfp(shape_A, angle_A, part_to_place, angle_B, cache_key)
+        
         with Shape.nfp_cache_lock: Shape.nfp_cache[cache_key] = nfp_data
         return nfp_data
 

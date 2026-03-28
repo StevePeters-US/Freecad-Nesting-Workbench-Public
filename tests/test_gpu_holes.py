@@ -40,18 +40,18 @@ def test_gpu_hole_nesting():
     # We call _calculate_and_cache_nfp_gpu(Donut, 0, Small, 0, "test_cache")
     nfp_data = engine._calculate_and_cache_nfp_gpu(part_a, 0, part_b, 0, "test_cache")
     
-    nfp_poly = nfp_data["polygon"]
-    print(f"\nNFP Area: {nfp_poly.area}")
-    print(f"NFP Interiors Count: {len(nfp_poly.interiors)}")
+    nfp_poly = nfp_data.get("polygon")
+    if nfp_poly:
+        print(f"\nNFP Area: {nfp_poly.area}")
+        print(f"NFP Interiors Count: {len(nfp_poly.interiors)}")
     
-    assert "convex_pieces" in nfp_data
-    pieces = nfp_data["convex_pieces"]
-    print(f"Num Convex Pieces: {len(pieces)}")
+    shells = nfp_data["shells"]
+    holes = nfp_data["holes"]
+    print(f"Num Shell Pieces: {len(shells)}")
+    print(f"Num Hole Pieces: {len(holes)}")
     
-    # Now check points using compute_batch_pip.
+    # Now check points using compute_batch_pip_with_holes.
     # NFP is centered at (0,0). 
-    # Hole IFP is roughly [-1.5, 1.5].
-    # Solid NFP area is roughly from -5.5 to 5.5 (excluding the hole).
     import nestingworkbench.Tools.Nesting.algorithms.nfp_gpu_taichi as nfp_gpu_taichi
     
     # (0,0) is center of hole -> No collision (0)
@@ -59,7 +59,7 @@ def test_gpu_hole_nesting():
     # (8,8) is outside NFP entirely -> No collision (0)
     points_np = np.array([[0.0, 0.0], [4.0, 4.0], [8.0, 8.0]], dtype=np.float32)
     
-    results = nfp_gpu_taichi.compute_batch_pip(points_np, pieces)
+    results = nfp_gpu_taichi.compute_batch_pip_with_holes(points_np, shells, holes)
     print(f"PIP Results: {results}")
     
     assert results[0] == 0  # Center of hole: OK
