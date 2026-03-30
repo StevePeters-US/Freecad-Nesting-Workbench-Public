@@ -4,29 +4,44 @@
 
 ---
 
-## Root Cause: Mixed Shell/Hole Accumulation
+## Architecture: One Cache, One Source of Truth
 
-The GPU No-Union scoring path accumulates all placed parts' NFP shells into one flat list
-and all IFP hole pieces into another flat list. The collision test is:
+`Shape.nfp_cache[(A, B, angle)]` is the **only** persistent NFP cache. It stores the
+geometric relationship between two part shapes at a given relative angle.
+
+`get_global_nfp_for` is **not** a cache — it is a pure function that builds placement
+collision data fresh on each call by iterating `sheet.parts`, looking up pairwise NFPs
+from `Shape.nfp_cache`, translating each to the placed part's position, and returning
+a local result dict.
+
+**There is no sheet-level NFP cache.** `sheet.nfp_cache` is a design error and must
+be removed (see NFP-006).
+
+---
+
+## Root Cause: Mixed Shell/Hole Test
+
+The GPU No-Union scoring path currently passes flat accumulated `shells` and `holes`
+lists to `compute_batch_pip_with_holes`. The collision test is:
 
 ```
-collision = (inside ANY shell) AND NOT (inside ANY hole)
+collision = (inside ANY shell from ALL parts) AND NOT (inside ANY hole from ALL parts)
 ```
 
-This is **semantically wrong** when multiple placed parts are on the sheet. A hole belonging
-to placed part A should only cancel a collision with A's shells — it must never cancel a
-collision with part B's shells.
+This is **semantically wrong** when multiple placed parts are on the sheet. A hole
+belonging to placed part A should only cancel a collision with A's shells — it must
+never cancel a collision with part B's shells.
 
-**Failure scenario** (causes overlaps in the screenshot):
+**Failure scenario** (causes overlaps):
 
 ```
-Placed: A (donut with hole), C (solid, already placed inside A's hole)
+Placed: A (donut with hole), C (solid, placed inside A's hole)
 Placing: D
 
-sheet.nfp_cache shells = [A_shells, C_shells]
-sheet.nfp_cache holes  = [A_hole_IFP]
+shells = [A_shells, C_shells]
+holes  = [A_hole_IFP]
 
-Candidate point P (inside A's hole AND inside C's shells):
+Candidate P (inside A's hole AND inside C's shells):
   inside_any_shell = True   (P overlaps C — real collision)
   inside_any_hole  = True   (P is in A's hole)
   current result   = NOT colliding   ← WRONG: D would overlap C
@@ -161,143 +176,177 @@ kernel failure is unrecoverable for the whole batch.
 
 ---
 
-## NFP-012: Fast-Path in NFP-007 When No Placed Part Has Holes
-
-| Field | Value |
-|-------|-------|
-| Complexity | Low |
-| File | `nestingworkbench/Tools/Nesting/algorithms/minkowski_engine.py` |
-| Depends on | NFP-006, NFP-007 |
-| Priority | HIGH — NFP-007 as written makes N GPU kernel calls per placement |
-
-**Context**
-
-NFP-007 introduces a per-part loop in `score_candidates_gpu` that makes one GPU kernel
-call per placed part. With 39 placed parts this is 39 kernel calls per rotation angle.
-GPU kernel dispatch has fixed overhead (~0.1–1ms each), so 39 calls × 4 rotations =
-156 kernel calls per part placement. For 39 parts this is ~6,000 kernel calls total.
-
-The vast majority of parts have no holes. For those cases, the per-part loop is
-unnecessary — all shells can be tested in a single combined call.
-
-**What to do**
-
-In `score_candidates_gpu`, after getting `per_part`:
-
-```python
-per_part = nfp_entry.get('per_part_nfps', [])
-
-if not per_part:
-    results = np.zeros(len(points), dtype=np.int32)
-elif not any(p['holes'] for p in per_part):
-    # Fast path: no placed part has holes — single combined PIP call
-    all_shells = [s for p in per_part for s in p['shells']]
-    results = nfp_gpu_taichi.compute_batch_pip(pts_np, all_shells) if all_shells else np.zeros(len(points), dtype=np.int32)
-else:
-    # Slow path: at least one part has holes — must test per-part
-    # Batch all no-hole parts together for one call, then add hole-parts individually
-    rejected = np.zeros(len(points), dtype=np.int32)
-
-    no_hole_shells = [s for p in per_part if not p['holes'] for s in p['shells']]
-    if no_hole_shells:
-        rejected |= nfp_gpu_taichi.compute_batch_pip(pts_np, no_hole_shells)
-
-    for nfp_pair in per_part:
-        if not nfp_pair['holes']:
-            continue  # already handled above
-        if nfp_pair['shells']:
-            rejected |= nfp_gpu_taichi.compute_batch_pip_with_holes(
-                pts_np, nfp_pair['shells'], nfp_pair['holes']
-            )
-    results = rejected
-```
-
-This reduces the common case (no holes anywhere on the sheet) to 1 kernel call, and
-the hole case to 1 + N_hole_parts calls (typically 1 + 1 or 1 + 2).
-
-**Acceptance criteria**
-
-1. With no holed parts on the sheet, exactly 1 GPU PIP kernel call per rotation angle.
-2. With 1 donut and N solid parts, exactly 2 kernel calls (1 for solids, 1 for donut).
-3. No regression in collision correctness (overlapping parts still rejected).
-4. Total nesting time for 39 parts should not regress vs. pre-NFP-007 baseline.
-
----
-
-## NFP-006: Per-Part NFP Pairs — Sheet Cache Restructure
+## NFP-006: Remove `sheet.nfp_cache`; Rewrite `get_global_nfp_for` as Pure Function
 
 | Field | Value |
 |-------|-------|
 | Complexity | Medium |
-| Files | `nestingworkbench/Tools/Nesting/algorithms/minkowski_engine.py` |
+| Files | `nestingworkbench/Tools/Nesting/algorithms/minkowski_engine.py`, `nestingworkbench/datatypes/sheet.py`, `nestingworkbench/Tools/Nesting/algorithms/nesting_strategy.py` |
 | Depends on | — |
+| Priority | HIGH — required before NFP-007 and NFP-012 |
 
 **Context**
 
-`get_global_nfp_for` builds the sheet-level cache entry. Currently it appends translated
-shells and holes into flat lists. Change it to record **one (shells, holes) pair per placed part**
-so that collision can be tested per-part.
+`sheet.nfp_cache` and `sheet.nfp_cache_lock` exist on every `Sheet` instance. They store
+an incrementally accumulated union of translated pairwise NFPs keyed by `(part_label, angle)`.
+This is wrong — the sheet object should not own NFP state. The only NFP cache is
+`Shape.nfp_cache[(A, B, angle)]` (pairwise, session-lifetime).
+
+`get_global_nfp_for` must become a pure function that computes the result fresh on each
+call with no persistent side effects.
 
 **What to do**
 
-1. Add `'per_part_nfps': []` to the initial entry dict in `get_global_nfp_for` (line ~67):
+**Step 1 — Remove sheet-level cache from `sheet.py`**
 
+In `Sheet.__init__` (lines ~40–41), delete:
 ```python
-sheet.nfp_cache[cache_key] = {
-    'polygon': Polygon(),
-    'last_part_idx': 0,
-    'points': [],
-    'prepared': None,
-    'shells': [],        # kept for backward compat / CPU path
-    'holes': [],         # kept for backward compat / CPU path
-    'per_part_nfps': [], # GPU path: list of {'shells': [...], 'holes': [...]}
-}
+self.nfp_cache = {}
+self.nfp_cache_lock = threading.Lock()
 ```
 
-2. In the GPU branch of the `for p in parts_to_process` loop (line ~121), replace the
-   flat-list extension with a per-part dict append:
+**Step 2 — Rewrite `get_global_nfp_for` in `minkowski_engine.py`**
+
+Replace the entire `get_global_nfp_for` method with:
 
 ```python
-if self.use_gpu:
-    part_shells = []
-    for piece in nfp_data.get('shells', []):
-        rotated = rotate(piece, placed_angle, origin=(0, 0))
-        part_shells.append(translate(rotated, xoff=cent.x, yoff=cent.y))
+def get_global_nfp_for(self, part_to_place, angle, sheet):
+    """
+    Build placement collision data for part_to_place at angle on sheet.
 
-    part_holes = []
-    for piece in nfp_data.get('holes', []):
-        rotated = rotate(piece, placed_angle, origin=(0, 0))
-        part_holes.append(translate(rotated, xoff=cent.x, yoff=cent.y))
+    Pure function — result is NOT cached. Shape.nfp_cache[(A, B, angle)]
+    is the only persistent cache (pairwise geometric relationships).
 
-    entry['per_part_nfps'].append({'shells': part_shells, 'holes': part_holes})
+    Returns dict:
+      'polygon'      — Polygon: CPU path incremental union (visualization + PIP)
+      'points'       — list[Point]: candidate positions (discretized NFP edges)
+      'per_part_nfps'— list[{'shells': [...], 'holes': [...]}]: one entry per
+                       placed part; used for per-part GPU collision scoring
+    Returns None if any pairwise NFP has an error flag.
+    """
+    part_label = part_to_place.source_freecad_object.Label
+    polygon = Polygon()
+    points = []
+    per_part_nfps = []
 
-    # Keep flat shells for candidate-point discretization (points still needed)
-    entry['shells'].extend(part_shells)
-    entry['holes'].extend(part_holes)
+    for p in sheet.parts:
+        placed_label = p.shape.source_freecad_object.Label
+        placed_angle = p.angle
 
-    # Candidate points: discretize NFP boundary
-    master = nfp_data.get('polygon')
-    if master and not master.is_empty:
-        rotated_m = rotate(master, placed_angle, origin=(0, 0))
-        translated_m = translate(rotated_m, xoff=cent.x, yoff=cent.y)
-        new_points.extend(self._discretize_edge(translated_m.exterior))
-        for interior in translated_m.interiors:
-            new_points.extend(self._discretize_edge(interior))
-    else:
-        for piece in part_shells:
-            new_points.extend(self._discretize_edge(piece.exterior))
+        relative_angle = (angle - placed_angle) % 360.0
+        if abs(relative_angle - 360.0) < 1e-5:
+            relative_angle = 0.0
+        relative_angle = round(relative_angle, 4)
+
+        nfp_cache_key = (
+            placed_label, part_label, relative_angle,
+            part_to_place.spacing, part_to_place.deflection, part_to_place.simplification
+        )
+
+        with Shape.nfp_cache_lock:
+            nfp_data = Shape.nfp_cache.get(nfp_cache_key)
+
+        # If batch-cached entry has empty holes for a placed part that has interior rings,
+        # force recompute via _calculate_and_cache_nfp_gpu to get correct IFP hole data.
+        if (nfp_data is not None
+                and self.use_gpu
+                and not nfp_data.get('holes')
+                and p.shape.original_polygon
+                and list(p.shape.original_polygon.interiors)):
+            nfp_data = None
+
+        if not nfp_data:
+            if self.use_gpu:
+                nfp_data = self._calculate_and_cache_nfp_gpu(
+                    p.shape, 0.0, part_to_place, relative_angle, nfp_cache_key
+                )
+            else:
+                nfp_data = self._calculate_and_cache_nfp(
+                    p.shape, 0.0, part_to_place, relative_angle, nfp_cache_key
+                )
+
+        if not nfp_data:
+            continue
+        if nfp_data.get('error'):
+            self.log(f"Skipping rotation due to NFP error: {nfp_data['error']}")
+            return None
+
+        cent = p.shape.centroid
+
+        if self.use_gpu:
+            part_shells = []
+            for piece in nfp_data.get('shells', []):
+                rotated = rotate(piece, placed_angle, origin=(0, 0))
+                part_shells.append(translate(rotated, xoff=cent.x, yoff=cent.y))
+
+            part_holes = []
+            for piece in nfp_data.get('holes', []):
+                rotated = rotate(piece, placed_angle, origin=(0, 0))
+                part_holes.append(translate(rotated, xoff=cent.x, yoff=cent.y))
+
+            per_part_nfps.append({'shells': part_shells, 'holes': part_holes})
+
+            # Candidate points: discretize the NFP boundary edges
+            master = nfp_data.get('polygon')
+            if master and not master.is_empty:
+                rotated_m = rotate(master, placed_angle, origin=(0, 0))
+                translated_m = translate(rotated_m, xoff=cent.x, yoff=cent.y)
+                points.extend(self._discretize_edge(translated_m.exterior))
+                for interior in translated_m.interiors:
+                    points.extend(self._discretize_edge(interior))
+            else:
+                for piece in part_shells:
+                    points.extend(self._discretize_edge(piece.exterior))
+        else:
+            # CPU path
+            master = nfp_data.get('polygon')
+            if not master:
+                continue
+            rotated = rotate(master, placed_angle, origin=(0, 0))
+            translated = translate(rotated, xoff=cent.x, yoff=cent.y)
+            if polygon.is_empty:
+                polygon = translated
+            else:
+                polygon = polygon.union(translated)
+            points.extend(self._discretize_edge(translated.exterior))
+            for interior in translated.interiors:
+                points.extend(self._discretize_edge(interior))
+
+    return {'polygon': polygon, 'points': points, 'per_part_nfps': per_part_nfps}
 ```
 
-3. Append `'per_part_nfps': []` handling for the lock section at the bottom — `per_part_nfps`
-   is already extended in-place above, so only `last_part_idx` and `points` need the lock
-   update (no change to existing lock section structure needed).
+**Step 3 — Fix `_evaluate_rotation` in `nesting_strategy.py`**
+
+`_evaluate_rotation` currently reads `nfp_entry.get('prepared')` and writes it back to
+the entry. Since the entry is no longer cached, build `prepared_nfp` locally:
+
+Replace lines ~124–133:
+```python
+# OLD
+union_poly = nfp_entry['polygon']
+prepared_nfp = nfp_entry.get('prepared')
+if not prepared_nfp and not union_poly.is_empty:
+    prepared_nfp = prep(union_poly)
+    with sheet.nfp_cache_lock:
+        if not nfp_entry.get('prepared'):
+            nfp_entry['prepared'] = prepared_nfp
+        else:
+            prepared_nfp = nfp_entry['prepared']
+```
+with:
+```python
+# NEW
+union_poly = nfp_entry['polygon']
+prepared_nfp = prep(union_poly) if not union_poly.is_empty else None
+```
 
 **Acceptance criteria**
 
-1. `sheet.nfp_cache[key]['per_part_nfps']` has one entry per placed part after `get_global_nfp_for`.
-2. Each entry has `'shells'` (list of Polygons) and `'holes'` (list of Polygons, may be empty).
-3. `entry['shells']` still contains all shells (flat, for discretization).
-4. No regression in CPU-path nesting (CPU path does not use `per_part_nfps`).
+1. `Sheet.__init__` no longer creates `nfp_cache` or `nfp_cache_lock`.
+2. `get_global_nfp_for` has no references to `sheet.nfp_cache`.
+3. Return value has keys `polygon`, `points`, `per_part_nfps`.
+4. CPU-path nesting still places parts correctly (no regression).
+5. GPU-path nesting still places parts correctly (no regression).
 
 ---
 
@@ -311,14 +360,16 @@ if self.use_gpu:
 
 **Context**
 
-`score_candidates_gpu` currently calls `compute_batch_pip_with_holes(pts, shells, holes)`
-once using the flat accumulated lists. Replace this with a per-part loop: a candidate point
-is **rejected** if it collides with ANY placed part (i.e., inside that part's shells AND
-NOT inside that part's holes).
+After NFP-006, `get_global_nfp_for` returns `per_part_nfps` — one `{shells, holes}` dict
+per placed part. `score_candidates_gpu` must use this for collision testing instead of
+the flat combined lists it currently passes to `compute_batch_pip_with_holes`.
+
+The correct rule: a candidate is **rejected** if it collides with ANY placed part.
+Collision with part i = (inside part_i.shells) AND NOT (inside part_i.holes).
 
 **What to do**
 
-Replace lines ~311–315 in `score_candidates_gpu`:
+Replace lines ~311–320 in `score_candidates_gpu`:
 
 ```python
 # OLD — incorrect mixed shells/holes test
@@ -339,86 +390,40 @@ pts_np = np.array([[p.x, p.y] for p in points], dtype=np.float32)
 per_part = nfp_entry.get('per_part_nfps', [])
 
 if not per_part:
-    # Empty sheet — no collision possible
     results = np.zeros(len(points), dtype=np.int32)
+elif not any(p['holes'] for p in per_part):
+    # Fast path: no placed part has holes — single combined PIP call
+    all_shells = [s for p in per_part for s in p['shells']]
+    results = (nfp_gpu_taichi.compute_batch_pip(pts_np, all_shells)
+               if all_shells else np.zeros(len(points), dtype=np.int32))
 else:
-    # A candidate is rejected if it collides with ANY placed part.
-    # Collision with part i = inside part_i.shells AND NOT inside part_i.holes
+    # Slow path: at least one placed part has holes — must test per-part
     rejected = np.zeros(len(points), dtype=np.int32)
+
+    no_hole_shells = [s for p in per_part if not p['holes'] for s in p['shells']]
+    if no_hole_shells:
+        rejected |= nfp_gpu_taichi.compute_batch_pip(pts_np, no_hole_shells)
+
     for nfp_pair in per_part:
-        p_shells = nfp_pair['shells']
-        p_holes = nfp_pair['holes']
-        if not p_shells:
-            continue
-        if p_holes:
-            part_result = nfp_gpu_taichi.compute_batch_pip_with_holes(
-                pts_np, p_shells, p_holes
+        if not nfp_pair['holes']:
+            continue  # already handled above
+        if nfp_pair['shells']:
+            rejected |= nfp_gpu_taichi.compute_batch_pip_with_holes(
+                pts_np, nfp_pair['shells'], nfp_pair['holes']
             )
-        else:
-            part_result = nfp_gpu_taichi.compute_batch_pip(pts_np, p_shells)
-        rejected |= part_result
     results = rejected
 ```
+
+This also subsumes NFP-012: the fast-path (single combined call when no part has holes)
+is included here directly.
 
 **Acceptance criteria**
 
 1. A part placed inside donut A's hole cannot overlap another part C also inside A's hole.
 2. A part can still be validly placed inside an empty donut hole (IFP works).
-3. GPU kernel call count = number of placed parts with holes, not 1 total.
-4. With zero placed parts with holes, only 1 kernel call is made (shells-only path).
+3. With no holed placed parts on the sheet, exactly 1 GPU PIP kernel call per angle.
+4. With 1 donut and N solid parts, exactly 2 kernel calls (1 for solids, 1 for donut).
 5. Screenshot shows no overlapping parts when filling holes.
-
----
-
-## NFP-008: Skip Flat Holes from `precompute_nfp_batch` in Hole Check
-
-| Field | Value |
-|-------|-------|
-| Complexity | Low |
-| Files | `nestingworkbench/Tools/Nesting/algorithms/minkowski_engine.py` |
-| Depends on | NFP-006, NFP-007 |
-
-**Context**
-
-`precompute_nfp_batch` stores `'holes': []` in pairwise cache entries (IFP for holes is not
-computed in the batch path — only in `_calculate_and_cache_nfp_gpu`). When `get_global_nfp_for`
-reads a batch-cached entry for a placed part that HAS holes, the holes list is empty. This
-means the part's hole IFP is silently missing, so parts cannot be placed inside that hole.
-
-The fix: when `get_global_nfp_for` reads a batch-cached entry with `holes: []` for a shape
-that has interior rings (`shape_A.original_polygon.interiors`), fall through to
-`_calculate_and_cache_nfp_gpu` to recompute the full entry with correct hole data.
-
-**What to do**
-
-In `get_global_nfp_for` (line ~102), after reading `nfp_data` from `Shape.nfp_cache`, add
-a check:
-
-```python
-with Shape.nfp_cache_lock:
-    nfp_data = Shape.nfp_cache.get(nfp_cache_key)
-
-# If cached entry is missing holes for a part that has interior rings, recompute
-if (nfp_data is not None
-        and self.use_gpu
-        and not nfp_data.get('holes')
-        and p.shape.original_polygon
-        and list(p.shape.original_polygon.interiors)):
-    nfp_data = None  # force recompute via _calculate_and_cache_nfp_gpu
-
-if not nfp_data:
-    if self.use_gpu:
-        nfp_data = self._calculate_and_cache_nfp_gpu(...)
-    else:
-        nfp_data = self._calculate_and_cache_nfp(...)
-```
-
-**Acceptance criteria**
-
-1. After placing a donut, parts placed afterwards correctly receive IFP hole data in their
-   per-part NFP entry.
-2. `precompute_nfp_batch` results are still used for parts without interior rings (no recompute).
-3. Parts can be placed inside holes when they fit.
 
 ---
 

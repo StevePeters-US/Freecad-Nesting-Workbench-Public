@@ -58,39 +58,33 @@ primary performance strategy.
 }
 ```
 
-### Level 2: Sheet Accumulation Cache (`sheet.nfp_cache`)
+### Level 2: `get_global_nfp_for` — Pure Placement Function (NOT a cache)
 
-Stores the **accumulated forbidden region** for a specific part+angle on a specific sheet.
-Built incrementally: each time a new part is placed on the sheet, only the new pairwise
-NFP is translated and added (tracked by `last_part_idx`).
+`get_global_nfp_for(part, angle, sheet)` is a **pure function** — it computes the
+placement collision data fresh on each call with no persistent side effects. There is
+no sheet-level NFP cache.
 
-| Attribute | Value |
-|-----------|-------|
-| Location | `sheet.nfp_cache` (per-Sheet instance dict) |
-| Key | `(label_part_to_place, angle)` |
-| Thread safety | `sheet.nfp_cache_lock` |
-| Lifetime | Per-sheet — reset when the sheet is reset |
+On each call it:
+1. Iterates `sheet.parts`
+2. Looks up each pairwise NFP from `Shape.nfp_cache[(placed, part, angle)]`
+3. Translates shells/holes to the placed part's actual sheet position
+4. Returns a local result dict
 
-**Sheet accumulation entry format:**
+**Return value:**
 ```python
 {
-    'polygon': Polygon,        # incremental union of all translated pairwise NFPs
-                               # CPU path: used for PIP test (via `prepared`)
-                               # GPU path: candidate discretization + visualization only
-    'last_part_idx': int,      # number of placed parts already processed
-    'points': [Point, ...],    # candidate positions (discretized NFP boundary edges)
-    'prepared': PreparedGeometry | None,  # shapely.prepared.prep(polygon) — lazy
-    'shells': [Polygon, ...],  # GPU: flat list of ALL placed parts' shell pieces
-    'holes': [Polygon, ...],   # GPU: flat list of ALL placed parts' hole pieces
-    'per_part_nfps': [         # GPU path: per-placed-part shell/hole pairs for correct scoring
+    'polygon': Polygon,         # CPU path: incremental union of translated NFPs
+                                # GPU path: visualization only
+    'points': [Point, ...],     # candidate positions (discretized NFP boundary edges)
+    'per_part_nfps': [          # GPU: one entry per placed part for correct scoring
         {'shells': [...], 'holes': [...]},  # placed part 0
         {'shells': [...], 'holes': [...]},  # placed part 1
     ],
 }
 ```
 
-> **CRITICAL — hole scoring:** Use `per_part_nfps` for GPU collision scoring, NOT the flat
-> `shells`/`holes` lists. Mixing all holes into one list causes A's hole IFP to cancel
+> **CRITICAL — hole scoring:** Use `per_part_nfps` for GPU collision scoring, NOT a flat
+> combined shells/holes list. Mixing all holes into one list causes A's hole IFP to cancel
 > collisions with unrelated part B's shells, allowing overlapping placements inside A's hole.
 > Each hole must only cancel its own part's shells. See `todo_nfp.md` NFP-006/007.
 
@@ -103,15 +97,16 @@ Before placement begins:
     → writes to Shape.nfp_cache[(A, B, angle)]
                                               ↓
 During placement of part B:
-  get_global_nfp_for(B, angle, sheet)
+  get_global_nfp_for(B, angle, sheet)   ← pure function, no persistent state
+    → iterates sheet.parts
     → reads Shape.nfp_cache[(placed_A, B, angle)] for each placed A
-    → translates pairwise NFP to A's position on sheet
-    → accumulates into sheet.nfp_cache[(B, angle)]['shells']/'polygon'/'points'
+    → translates pairwise NFP shells/holes to A's position on sheet
+    → returns {polygon, points, per_part_nfps} as a local dict
                                               ↓
   score_candidates_gpu() / _evaluate_rotation()
-    → reads sheet.nfp_cache[(B, angle)]
-    → GPU: compute_batch_pip_with_holes(pts, shells, holes)
-    → CPU: prepared_nfp.contains(pt)
+    → receives the local dict from get_global_nfp_for
+    → GPU: per-part loop over per_part_nfps, OR results
+    → CPU: prep(polygon).contains(pt)
 ```
 
 ---
@@ -153,11 +148,9 @@ See `todo_nfp.md` NFP-001 for the fix.
 ## Gotchas
 
 - NFP computation is ~80% of total nesting time for complex parts
-- **Never build the sheet-level union inside a pairwise NFP cache entry.** The pairwise cache
-  must only store the A+B relationship; position on the sheet is added in `get_global_nfp_for`.
-- Thread safety: `nfp_cache_lock` must be held for all `Shape.nfp_cache` reads/writes
-- The `sheet.nfp_cache` `polygon` field builds incrementally — do NOT replace it on each call;
-  use `entry['polygon'].union(new_translated)` and extend `entry['points']` (do not replace).
+- **`Shape.nfp_cache` is the only persistent NFP cache.** There is no sheet-level cache.
+  `get_global_nfp_for` is a pure function — its return value is a local dict, not stored.
+- Thread safety: `Shape.nfp_cache_lock` must be held for all `Shape.nfp_cache` reads/writes.
 - GPU `shells` pieces are in **centered space** (polygon translated to origin before NFP computation).
   They are translated to the placed part's actual sheet position in `get_global_nfp_for`.
 - `precompute_nfp_batch` and `_calculate_and_cache_nfp_gpu` must produce the **same cache
