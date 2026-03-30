@@ -121,8 +121,6 @@ class MinkowskiEngine:
             if self.use_gpu:
                 # GPU Path: Collect all shell/hole pieces for scoring (No-Union)
                 shells = nfp_data.get('shells', [])
-                # Fallback for old cache entries
-                if not shells and 'convex_pieces' in nfp_data: shells = nfp_data['convex_pieces']
                 
                 for piece in shells:
                     rotated = rotate(piece, placed_angle, origin=(0, 0))
@@ -282,7 +280,13 @@ class MinkowskiEngine:
                         if not union_poly.is_valid:
                             union_poly = union_poly.buffer(0)
                         
-                        nfp_data = {'polygon': union_poly, 'points': [], 'error': None}
+                        nfp_data = {
+                            'shells': hulls,
+                            'holes': [],  # IFP for holes not pre-calculated in batch path
+                            'polygon': union_poly,
+                            'points': [],
+                            'error': None
+                        }
                         with Shape.nfp_cache_lock:
                             if cache_key not in Shape.nfp_cache:
                                 Shape.nfp_cache[cache_key] = nfp_data
@@ -304,21 +308,16 @@ class MinkowskiEngine:
         for angle, points in rotation_candidates:
             nfp_entry = self.get_global_nfp_for(part_to_place, angle, sheet)
             
-            # GPU-002: Use pre-collected individual convex pieces
-            convex_nfps = nfp_entry.get('convex_pieces', [])
+            # GPU-002: Use shells/holes from the sheet-level accumulated cache
+            shell_pieces = nfp_entry.get('shells', [])
+            hole_pieces = nfp_entry.get('holes', [])
             
-            # If for some reason we don't have pieces (e.g. legacy cache), fallback to decomposition
-            if not convex_nfps and not nfp_entry['polygon'].is_empty:
-                poly_union = nfp_entry['polygon']
-                if poly_union.geom_type == 'Polygon':
-                    convex_nfps = minkowski_utils.decompose_if_needed(poly_union, self.log)
-                elif poly_union.geom_type == 'MultiPolygon':
-                    convex_nfps = []
-                    for p in poly_union.geoms:
-                        convex_nfps.extend(minkowski_utils.decompose_if_needed(p, self.log))
-
             pts_np = np.array([[p.x, p.y] for p in points], dtype=np.float32)
-            results = nfp_gpu_taichi.compute_batch_pip(pts_np, convex_nfps) if convex_nfps else np.zeros(len(points), dtype=np.int32)
+            if shell_pieces:
+                results = nfp_gpu_taichi.compute_batch_pip_with_holes(pts_np, shell_pieces, hole_pieces)
+            else:
+                # No cached shells — sheet is empty or cache miss; no collision
+                results = np.zeros(len(points), dtype=np.int32)
             
             # GPU-005: Batch container bounds check
             rotated_poly = rotate(part_to_place.original_polygon, angle, origin='centroid')
