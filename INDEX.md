@@ -135,12 +135,13 @@
 ### Sandbox Pattern
 All nesting runs use a temporary `Layout_temp_*` group. On commit it's renamed to `Layout_NNN`. On cancel it's deleted. This prevents partial results from polluting the document.
 
-### NFP Caching (Two-Level)
-The system uses two NFP cache levels — read `nw_nfp_algorithm` skill before touching either:
+### NFP Caching (Single-Level)
+One persistent cache — read `nw_nfp_algorithm` skill before touching it:
 - **`Shape.nfp_cache`** — class-level dict, key = `(label_A, label_B, angle, spacing, deflection, simplification)`. Stores pairwise NFP data (GPU format: `shells`/`holes`/`polygon`; CPU format: `polygon`). Survives across nesting runs.
-- **`sheet.nfp_cache`** — per-Sheet dict, key = `(label_part, angle)`. Stores the incrementally accumulated forbidden region for one part+angle on this sheet. Rebuilt per sheet.
 
-Both caches guarded by their respective locks (`Shape.nfp_cache_lock`, `sheet.nfp_cache_lock`). NFPs are ~80% of total nesting time — pre-caching via `precompute_nfp_batch` is critical.
+`get_global_nfp_for` is a **pure function** — it reads from `Shape.nfp_cache` and returns a local `{polygon, points, per_part_nfps}` dict with no persistent side effects. There is no sheet-level NFP cache.
+
+Guarded by `Shape.nfp_cache_lock`. NFPs are ~80% of total nesting time — pre-caching via `precompute_nfp_batch` is critical.
 
 ### GA Population Management
 `LayoutManager` creates N layout candidates per generation. Each is nested independently. Fitness sorts them. The best survive to the next generation. Currently crossover/tournament are defined but not wired in (see TASK-008).

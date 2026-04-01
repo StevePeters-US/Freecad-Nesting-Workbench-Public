@@ -1,6 +1,7 @@
 
 import math
 import time
+import numpy as np
 import FreeCAD
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
@@ -17,6 +18,75 @@ except ImportError as e:
     FreeCAD.Console.PrintError(f"nfp_gpu_taichi Import Error: {e}\n")
     nfp_gpu_taichi = None
 from ....datatypes.shape import Shape
+
+class _CoordsPolygon:
+    """Lightweight shell wrapper for GPU PIP — only provides .exterior.coords.
+    Avoids creating full Shapely Polygon objects during per-shell transforms."""
+    class _Ext:
+        __slots__ = ('coords',)
+        def __init__(self, coords): self.coords = coords
+    __slots__ = ('exterior',)
+    def __init__(self, coords): self.exterior = self._Ext(coords)
+
+
+def _make_shells_batch(hulls):
+    """Pre-convert shell polygons to a single batched numpy array for fast transforms.
+
+    Called once at cache-write time. Result stored as 'shells_batch' in nfp_data.
+    Returns dict: {'coords': (N,2) float64, 'split_at': int64 array of split indices}.
+    """
+    if not hulls:
+        return {'coords': np.empty((0, 2), dtype=np.float64), 'split_at': np.empty(0, dtype=np.int64)}
+    arrays = [np.array(h.exterior.coords, dtype=np.float64) for h in hulls]
+    lengths = [len(a) for a in arrays]
+    split_at = np.cumsum(lengths)[:-1]
+    return {'coords': np.vstack(arrays), 'split_at': split_at}
+
+
+def _xform_shells_batched(batch, placed_angle_deg, dx, dy):
+    """Transform pre-batched shells. Single numpy op regardless of shell count.
+
+    ~100x faster than _xform_shells_numpy for large shell counts (e.g. 2209 shells)
+    because all coordinates are transformed with one matrix multiply instead of N
+    individual np.array(shell.exterior.coords) conversions.
+    """
+    all_coords = batch['coords']
+    if len(all_coords) == 0:
+        return []
+    transformed = all_coords.copy()
+    if abs(placed_angle_deg) > 1e-9:
+        a = math.radians(placed_angle_deg)
+        ca, sa = math.cos(a), math.sin(a)
+        rot = np.array([[ca, -sa], [sa, ca]], dtype=np.float64)
+        transformed = transformed @ rot.T
+    transformed[:, 0] += dx
+    transformed[:, 1] += dy
+    shell_arrays = np.split(transformed, batch['split_at'])
+    return [_CoordsPolygon(arr) for arr in shell_arrays]
+
+
+def _xform_shells_numpy(shells, placed_angle_deg, dx, dy):
+    """Fallback: rotate+translate per-shell when no pre-batch is available."""
+    if not shells:
+        return []
+    result = []
+    if abs(placed_angle_deg) > 1e-9:
+        a = math.radians(placed_angle_deg)
+        ca, sa = math.cos(a), math.sin(a)
+        rot = np.array([[ca, -sa], [sa, ca]], dtype=np.float64)
+        for shell in shells:
+            coords = np.array(shell.exterior.coords, dtype=np.float64)
+            coords[:, :2] = coords[:, :2] @ rot.T
+            coords[:, 0] += dx
+            coords[:, 1] += dy
+            result.append(_CoordsPolygon(coords))
+    else:
+        off = np.array([dx, dy], dtype=np.float64)
+        for shell in shells:
+            coords = np.array(shell.exterior.coords, dtype=np.float64) + off
+            result.append(_CoordsPolygon(coords))
+    return result
+
 
 class MinkowskiEngine:
     """
@@ -73,6 +143,9 @@ class MinkowskiEngine:
         polygon = Polygon()
         points = []
         per_part_nfps = []
+        t0_total = time.perf_counter()
+        n_hits = 0
+        n_misses = 0
 
         for p in sheet.parts:
             placed_label = p.shape.source_freecad_object.Label
@@ -91,16 +164,23 @@ class MinkowskiEngine:
             with Shape.nfp_cache_lock:
                 nfp_data = Shape.nfp_cache.get(nfp_cache_key)
 
-            # If batch-cached entry has empty holes for a placed part that has interior rings,
-            # force recompute via _calculate_and_cache_nfp_gpu to get correct IFP hole data.
+            # If batch-cached entry has holes=None (not computed) for a placed part that has
+            # interior rings, clear it and force recompute via _calculate_and_cache_nfp_gpu.
+            # CRITICAL: must remove from Shape.nfp_cache first — otherwise _calculate_and_cache_nfp_gpu
+            # finds the stale entry and returns it immediately, keeping holes=None forever.
+            # NOTE: holes=[] (empty list) means "computed but B doesn't fit" — do NOT invalidate.
             if (nfp_data is not None
                     and self.use_gpu
-                    and not nfp_data.get('holes')
+                    and nfp_data.get('holes') is None
                     and p.shape.original_polygon
                     and list(p.shape.original_polygon.interiors)):
+                with Shape.nfp_cache_lock:
+                    Shape.nfp_cache.pop(nfp_cache_key, None)
                 nfp_data = None
 
             if not nfp_data:
+                n_misses += 1
+                t_miss = time.perf_counter()
                 if self.use_gpu:
                     nfp_data = self._calculate_and_cache_nfp_gpu(
                         p.shape, 0.0, part_to_place, relative_angle, nfp_cache_key
@@ -109,6 +189,10 @@ class MinkowskiEngine:
                     nfp_data = self._calculate_and_cache_nfp(
                         p.shape, 0.0, part_to_place, relative_angle, nfp_cache_key
                     )
+                dt_miss = (time.perf_counter() - t_miss) * 1000
+                self.log(f"[PERF] NFP cache MISS key={nfp_cache_key[:3]} angle={relative_angle:.1f} -> {dt_miss:.1f}ms")
+            else:
+                n_hits += 1
 
             if not nfp_data:
                 continue
@@ -119,27 +203,36 @@ class MinkowskiEngine:
             cent = p.shape.centroid
 
             if self.use_gpu:
-                part_shells = []
-                for piece in nfp_data.get('shells', []):
-                    rotated = rotate(piece, placed_angle, origin=(0, 0))
-                    part_shells.append(translate(rotated, xoff=cent.x, yoff=cent.y))
+                t_xform = time.perf_counter()
 
+                # Always fetch raw_shells (needed for fallback discretize when master is empty).
+                raw_shells = nfp_data.get('shells', [])
+                # Use pre-batched transform when available (single numpy op regardless of shell count).
+                # Falls back to per-shell numpy when shells_batch is absent (old cache entries).
+                shells_batch = nfp_data.get('shells_batch')
+                if shells_batch is not None:
+                    part_shells = _xform_shells_batched(shells_batch, placed_angle, cent.x, cent.y)
+                else:
+                    part_shells = _xform_shells_numpy(raw_shells, placed_angle, cent.x, cent.y)
+
+                raw_holes = nfp_data.get('holes')  # None = not computed, [] = computed/empty
+                # Holes are few; use full Shapely (needed for _discretize_edge later)
                 part_holes = []
-                for piece in nfp_data.get('holes', []):
-                    rotated = rotate(piece, placed_angle, origin=(0, 0))
-                    part_holes.append(translate(rotated, xoff=cent.x, yoff=cent.y))
+                for piece in (raw_holes or []):
+                    r = rotate(piece, placed_angle, origin=(0, 0)) if abs(placed_angle) > 1e-9 else piece
+                    part_holes.append(translate(r, xoff=cent.x, yoff=cent.y))
 
                 per_part_nfps.append({'shells': part_shells, 'holes': part_holes})
 
-                # Candidate points: discretize the NFP boundary edges
+                # Candidate points: discretize NFP shell boundary edges
                 master = nfp_data.get('polygon')
                 if master and not master.is_empty:
-                    rotated_m = rotate(master, placed_angle, origin=(0, 0))
+                    rotated_m = rotate(master, placed_angle, origin=(0, 0)) if abs(placed_angle) > 1e-9 else master
                     translated_m = translate(rotated_m, xoff=cent.x, yoff=cent.y)
                     points.extend(self._discretize_edge(translated_m.exterior))
                     for interior in translated_m.interiors:
                         points.extend(self._discretize_edge(interior))
-                    
+
                     # Best-effort union for global visualization ONLY
                     try:
                         if polygon.is_empty:
@@ -148,8 +241,20 @@ class MinkowskiEngine:
                             polygon = polygon.union(translated_m)
                     except Exception: pass
                 else:
-                    for piece in part_shells:
-                        points.extend(self._discretize_edge(piece.exterior))
+                    # Fallback: discretize individual shells (needs Shapely for .length/.interpolate)
+                    for raw in raw_shells:
+                        r = rotate(raw, placed_angle, origin=(0, 0)) if abs(placed_angle) > 1e-9 else raw
+                        points.extend(self._discretize_edge(translate(r, xoff=cent.x, yoff=cent.y).exterior))
+
+                # Add IFP void boundary edges as placement candidates (void nesting)
+                for piece in part_holes:
+                    points.extend(self._discretize_edge(piece.exterior))
+
+                dt_xform = (time.perf_counter() - t_xform) * 1000
+                if dt_xform > 20.0:
+                    xform_path = "batched" if shells_batch is not None else "per-shell"
+                    self.log(f"[PERF] NFP xform slow ({xform_path}): {placed_label}->{part_label} "
+                             f"{len(part_shells)}shells {len(part_holes)}holes -> {dt_xform:.1f}ms")
             else:
                 # CPU path
                 master = nfp_data.get('polygon')
@@ -165,6 +270,11 @@ class MinkowskiEngine:
                 for interior in translated.interiors:
                     points.extend(self._discretize_edge(interior))
 
+        dt_total = (time.perf_counter() - t0_total) * 1000
+        if n_misses > 0 or dt_total > 10.0:
+            self.log(f"[PERF] get_global_nfp_for angle={angle:.1f} "
+                     f"hits={n_hits} misses={n_misses} "
+                     f"total={dt_total:.1f}ms candidates={len(points)}")
         return {'polygon': polygon, 'points': points, 'per_part_nfps': per_part_nfps}
 
     def _get_decomposition(self, shape):
@@ -193,24 +303,32 @@ class MinkowskiEngine:
         
         for angle in angles:
             for p in sheet.parts:
+                # Skip placed parts with holes — batch path can't compute IFP.
+                # get_global_nfp_for will compute them on-demand via _calculate_and_cache_nfp_gpu.
+                if p.shape.original_polygon and list(p.shape.original_polygon.interiors):
+                    continue
+
                 placed_label = p.shape.source_freecad_object.Label
                 placed_angle = p.angle
                 relative_angle = (angle - placed_angle) % 360.0
                 if abs(relative_angle - 360.0) < 1e-5: relative_angle = 0.0
                 relative_angle = round(relative_angle, 4)
-                
+
                 nfp_cache_key = (
-                    placed_label, part_to_place_label, relative_angle, 
+                    placed_label, part_to_place_label, relative_angle,
                     part_to_place.spacing, part_to_place.deflection, part_to_place.simplification
                 )
-                
+
                 with Shape.nfp_cache_lock:
                     if nfp_cache_key not in Shape.nfp_cache:
                         missing_pairs.append({'shape_A': p.shape, 'angle_B': relative_angle, 'key': nfp_cache_key})
         
+        self.log(f"[PERF] precompute_nfp_batch: {len(missing_pairs)} missing pairs "
+                 f"({len(angles)} angles × {len(sheet.parts)} placed parts)")
         if not missing_pairs:
             return
 
+        t0_batch = time.perf_counter()
         try:
             poly_b_parts = self._get_decomposition(part_to_place)
             from shapely.affinity import scale
@@ -275,7 +393,8 @@ class MinkowskiEngine:
                             
                             nfp_data = {
                                 'shells': hulls,
-                                'holes': [],  # IFP for holes not pre-calculated in batch path
+                                'shells_batch': _make_shells_batch(hulls),
+                                'holes': None,  # None = IFP not yet computed ([] = computed/empty)
                                 'polygon': union_poly,
                                 'points': [],
                                 'error': None
@@ -290,6 +409,8 @@ class MinkowskiEngine:
                     self.log(f"GPU batch union total: {t_union:.1f}ms")
         except Exception as e:
             self.log(f"Batch NFP precompute error: {e}")
+        dt_batch = (time.perf_counter() - t0_batch) * 1000
+        self.log(f"[PERF] precompute_nfp_batch total: {dt_batch:.1f}ms")
 
     def score_candidates_gpu(self, part_to_place, rotation_candidates):
         """Calculates scores for multiple candidates using GPU PIP scoring.
@@ -304,6 +425,10 @@ class MinkowskiEngine:
         import numpy as np
         best_overall = {'metric': float('inf')}
         dir_x, dir_y = self.search_direction
+        t0_score = time.perf_counter()
+        total_candidates = sum(len(pts) for _, pts, _ in rotation_candidates)
+        self.log(f"[PERF] score_candidates_gpu: {len(rotation_candidates)} angles, "
+                 f"{total_candidates} total candidates")
 
         for angle, points, nfp_entry in rotation_candidates:
             
@@ -369,6 +494,8 @@ class MinkowskiEngine:
             
             if self.verbose and n_scored > 0:
                 self.log(f"GPU scored {n_scored} candidates in batch at angle {angle}")
+        dt_score = (time.perf_counter() - t0_score) * 1000
+        self.log(f"[PERF] score_candidates_gpu total: {dt_score:.1f}ms best={best_overall.get('metric', 'inf'):.2f}")
         return best_overall
 
     def _calculate_and_cache_nfp(self, shape_A, angle_A, part_to_place, angle_B, cache_key):
@@ -464,6 +591,7 @@ class MinkowskiEngine:
                 
             nfp_data = {
                 "shells": nfp_shells,
+                "shells_batch": _make_shells_batch(nfp_shells),
                 "holes": nfp_holes,
                 "polygon": master_nfp
             }
