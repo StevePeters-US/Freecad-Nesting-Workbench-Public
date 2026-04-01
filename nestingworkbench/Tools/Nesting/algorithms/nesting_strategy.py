@@ -64,17 +64,21 @@ class PlacementOptimizer:
             # 1. Collect candidates for ALL rotations
             all_rotation_candidates = []
             angles = [i * (360.0 / part_rotation_steps) for i in range(part_rotation_steps)]
-            
+
             # Precompute NFPs in batch on GPU
             self.engine.precompute_nfp_batch(part, angles, sheet)
-            
+
             for angle in angles:
-                candidates = self._get_candidates_for_rotation(angle, part, sheet)
+                # Call get_global_nfp_for ONCE and pass it to both helpers
+                nfp_entry = self.engine.get_global_nfp_for(part, angle, sheet)
+                if nfp_entry is None:
+                    continue
+                candidates = self._get_candidates_for_rotation(angle, part, sheet, nfp_entry=nfp_entry)
                 if candidates:
-                    all_rotation_candidates.append((angle, candidates))
-            
+                    all_rotation_candidates.append((angle, candidates, nfp_entry))
+
             # 2. Batch score on GPU
-            res = self.engine.score_candidates_gpu(part, all_rotation_candidates, sheet)
+            res = self.engine.score_candidates_gpu(part, all_rotation_candidates)
             if res and res.get('metric', float('inf')) < best_result['metric']:
                 best_result = res
                 # BUG-003: Restore visual feedback for GPU path
@@ -119,21 +123,13 @@ class PlacementOptimizer:
             return {'metric': float('inf')}
         
         bin_polygon = self.engine.bin_polygon
-        
+
         # Prepare geometry for fast containment check
         union_poly = nfp_entry['polygon']
-        prepared_nfp = nfp_entry.get('prepared')
-        if not prepared_nfp and not union_poly.is_empty:
-             prepared_nfp = prep(union_poly)
-             with sheet.nfp_cache_lock:
-                 # Double-check: another thread may have set it
-                 if not nfp_entry.get('prepared'):
-                     nfp_entry['prepared'] = prepared_nfp
-                 else:
-                     prepared_nfp = nfp_entry['prepared']
+        prepared_nfp = prep(union_poly) if not union_poly.is_empty else None
 
-        # 2. Generate Candidates
-        ext_cands = self._get_candidates_for_rotation(angle, part, sheet)
+        # 2. Generate Candidates — pass the already-computed nfp_entry to avoid a second call
+        ext_cands = self._get_candidates_for_rotation(angle, part, sheet, nfp_entry=nfp_entry)
         if not ext_cands:
             return {'metric': float('inf')}
             
@@ -179,9 +175,13 @@ class PlacementOptimizer:
              
         return best
 
-    def _get_candidates_for_rotation(self, angle, part, sheet):
-        """Helper to compute candidate points for a specific rotation."""
-        nfp_entry = self.engine.get_global_nfp_for(part, angle, sheet)
+    def _get_candidates_for_rotation(self, angle, part, sheet, nfp_entry=None):
+        """Helper to compute candidate points for a specific rotation.
+
+        Pass a pre-computed nfp_entry to avoid a redundant get_global_nfp_for call.
+        """
+        if nfp_entry is None:
+            nfp_entry = self.engine.get_global_nfp_for(part, angle, sheet)
         if nfp_entry is None:
             return []
             

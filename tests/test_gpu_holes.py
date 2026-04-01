@@ -14,6 +14,7 @@ class MockPart:
         self.spacing = 0.0
         self.deflection = 0.5
         self.simplification = 0.0
+        self.area = poly.area
 
 from unittest.mock import MagicMock
 
@@ -65,3 +66,67 @@ def test_gpu_hole_nesting():
     assert results[0] == 0  # Center of hole: OK
     assert results[1] == 1  # Solid part: Collision
     assert results[2] == 0  # Outside NFP: OK
+
+def test_two_parts_in_hole_no_overlap():
+    if not TAICHI_AVAILABLE:
+        pytest.skip("Taichi not available")
+
+    # Setup Engine
+    engine = MinkowskiEngine(100, 100, 1.0, use_gpu=True)
+    
+    # Donut: 20x20 square with 12x12 hole in center (at 4,4 to 16,16)
+    donut_poly = Polygon([(0, 0), (20, 0), (20, 20), (0, 20)], 
+                         [[(4, 4), (16, 4), (16, 16), (4, 16)]])
+    
+    # Small Square: 2x2
+    small_poly = Polygon([(0, 0), (2, 0), (2, 2), (0, 2)])
+    
+    # Setup Placed Part A (Donut)
+    part_a = MockPart(donut_poly, "Donut")
+    
+    # Setup Placed Part C (Small) - will be placed inside Donut's hole
+    part_c = MockPart(small_poly, "Small_C")
+    
+    class MockPlacedPart:
+        def __init__(self, shape, angle, centroid):
+            self.shape = shape
+            self.angle = angle
+            self.shape.centroid = centroid
+
+    # Place A at (0,0) -> hole is (4,4)-(16,16)
+    placed_a = MockPlacedPart(part_a, 0.0, Point(10, 10))
+    # Place C at (6,6) -> inside hole
+    placed_c = MockPlacedPart(part_c, 0.0, Point(6, 6))
+    
+    from nestingworkbench.datatypes.sheet import Sheet
+    sheet = Sheet("test_sheet", 100, 100)
+    sheet.add_part(placed_a)
+    sheet.add_part(placed_c)
+    
+    # Part D (Small Square) to be placed
+    part_d = MockPart(small_poly, "Small_D")
+    
+    # 1. Compute global NFP for angle 0
+    nfp_entry = engine.get_global_nfp_for(part_d, 0.0, sheet)
+    
+    assert nfp_entry is not None
+    assert 'per_part_nfps' in nfp_entry
+    assert len(nfp_entry['per_part_nfps']) == 2
+    
+    # 2. Score candidates using GPU logic
+    # Candidate 1: (6, 6) -> overlaps C (collision with C's shells)
+    # Candidate 2: (12, 12) -> inside hole, clear of C
+    # Build nfp_entry for angle=0 — required by new score_candidates_gpu API
+    nfp_entry = engine.get_global_nfp_for(part_d, 0.0, sheet)
+    assert nfp_entry is not None
+
+    points = [Point(6, 6), Point(12, 12)]
+    candidates = [(0.0, points, nfp_entry)]
+
+    # dir=(0,-1) -> metric = pt.x*(0) + pt.y*(1) = pt.y; smaller Y is better.
+    # 6 < 12, so (6,6) would be preferred — but it overlaps C, so (12,12) is picked.
+
+    result = engine.score_candidates_gpu(part_d, candidates)
+    
+    assert result['x'] == 12.0
+    assert result['y'] == 12.0

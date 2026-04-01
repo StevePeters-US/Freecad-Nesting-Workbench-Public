@@ -57,50 +57,49 @@ class MinkowskiEngine:
 
     def get_global_nfp_for(self, part_to_place, angle, sheet):
         """
-        Calculates (incrementally) the total forbidden area (Union of NFPs) 
-        for a specific part rotation on the sheet.
-        """
-        cache_key = (part_to_place.source_freecad_object.Label, round(angle, 4))
-        
-        with sheet.nfp_cache_lock:
-            if cache_key not in sheet.nfp_cache:
-                sheet.nfp_cache[cache_key] = {
-                    'polygon': Polygon(), 
-                    'last_part_idx': 0,
-                    'points': [],
-                    'prepared': None,
-                    'shells': [],      # GPU-007: Store individual solid pieces
-                    'holes': []        # GPU-007: Store individual hole pieces
-                }
-            entry = sheet.nfp_cache[cache_key]
-            target_idx = len(sheet.parts)
-            if entry['last_part_idx'] >= target_idx:
-                return entry
-            start_idx = entry['last_part_idx']
-            parts_to_process = sheet.parts[start_idx:target_idx]
+        Build placement collision data for part_to_place at angle on sheet.
 
-        new_points = []
-        part_to_place_master_label = part_to_place.source_freecad_object.Label
-        
-        for p in parts_to_process:
+        Pure function — result is NOT cached. Shape.nfp_cache[(A, B, angle)]
+        is the only persistent cache (pairwise geometric relationships).
+
+        Returns dict:
+          'polygon'      — Polygon: CPU path incremental union (visualization + PIP)
+          'points'       — list[Point]: candidate positions (discretized NFP edges)
+          'per_part_nfps'— list[{'shells': [...], 'holes': [...]}]: one entry per
+                           placed part; used for per-part GPU collision scoring
+        Returns None if any pairwise NFP has an error flag.
+        """
+        part_label = part_to_place.source_freecad_object.Label
+        polygon = Polygon()
+        points = []
+        per_part_nfps = []
+
+        for p in sheet.parts:
             placed_label = p.shape.source_freecad_object.Label
             placed_angle = p.angle
-            
+
             relative_angle = (angle - placed_angle) % 360.0
-            if abs(relative_angle - 360.0) < 1e-5: relative_angle = 0.0
+            if abs(relative_angle - 360.0) < 1e-5:
+                relative_angle = 0.0
             relative_angle = round(relative_angle, 4)
-            
+
             nfp_cache_key = (
-                placed_label, 
-                part_to_place_master_label, 
-                relative_angle, 
-                part_to_place.spacing,
-                part_to_place.deflection,
-                part_to_place.simplification
+                placed_label, part_label, relative_angle,
+                part_to_place.spacing, part_to_place.deflection, part_to_place.simplification
             )
-            
+
             with Shape.nfp_cache_lock:
                 nfp_data = Shape.nfp_cache.get(nfp_cache_key)
+
+            # If batch-cached entry has empty holes for a placed part that has interior rings,
+            # force recompute via _calculate_and_cache_nfp_gpu to get correct IFP hole data.
+            if (nfp_data is not None
+                    and self.use_gpu
+                    and not nfp_data.get('holes')
+                    and p.shape.original_polygon
+                    and list(p.shape.original_polygon.interiors)):
+                nfp_data = None
+
             if not nfp_data:
                 if self.use_gpu:
                     nfp_data = self._calculate_and_cache_nfp_gpu(
@@ -110,72 +109,63 @@ class MinkowskiEngine:
                     nfp_data = self._calculate_and_cache_nfp(
                         p.shape, 0.0, part_to_place, relative_angle, nfp_cache_key
                     )
-            
-            if not nfp_data: continue
+
+            if not nfp_data:
+                continue
             if nfp_data.get('error'):
                 self.log(f"Skipping rotation due to NFP error: {nfp_data['error']}")
                 return None
 
             cent = p.shape.centroid
-            
-            if self.use_gpu:
-                # GPU Path: Collect all shell/hole pieces for scoring (No-Union)
-                shells = nfp_data.get('shells', [])
-                
-                for piece in shells:
-                    rotated = rotate(piece, placed_angle, origin=(0, 0))
-                    translated = translate(rotated, xoff=cent.x, yoff=cent.y)
-                    entry['shells'].append(translated)
-                    
-                holes = nfp_data.get('holes', [])
-                for piece in holes:
-                    rotated = rotate(piece, placed_angle, origin=(0, 0))
-                    translated = translate(rotated, xoff=cent.x, yoff=cent.y)
-                    entry['holes'].append(translated)
 
-                # Candidate Points: Discretize the part-pair NFP boundary (optimized)
+            if self.use_gpu:
+                part_shells = []
+                for piece in nfp_data.get('shells', []):
+                    rotated = rotate(piece, placed_angle, origin=(0, 0))
+                    part_shells.append(translate(rotated, xoff=cent.x, yoff=cent.y))
+
+                part_holes = []
+                for piece in nfp_data.get('holes', []):
+                    rotated = rotate(piece, placed_angle, origin=(0, 0))
+                    part_holes.append(translate(rotated, xoff=cent.x, yoff=cent.y))
+
+                per_part_nfps.append({'shells': part_shells, 'holes': part_holes})
+
+                # Candidate points: discretize the NFP boundary edges
                 master = nfp_data.get('polygon')
                 if master and not master.is_empty:
-                    rotated = rotate(master, placed_angle, origin=(0, 0))
-                    translated = translate(rotated, xoff=cent.x, yoff=cent.y)
+                    rotated_m = rotate(master, placed_angle, origin=(0, 0))
+                    translated_m = translate(rotated_m, xoff=cent.x, yoff=cent.y)
+                    points.extend(self._discretize_edge(translated_m.exterior))
+                    for interior in translated_m.interiors:
+                        points.extend(self._discretize_edge(interior))
                     
-                    # Discretize for candidate points
-                    new_points.extend(self._discretize_edge(translated.exterior))
-                    for interior in translated.interiors:
-                        new_points.extend(self._discretize_edge(interior))
-                        
                     # Best-effort union for global visualization ONLY
                     try:
-                        if entry['polygon'].is_empty:
-                            entry['polygon'] = translated
+                        if polygon.is_empty:
+                            polygon = translated_m
                         else:
-                            entry['polygon'] = entry['polygon'].union(translated)
+                            polygon = polygon.union(translated_m)
                     except Exception: pass
                 else:
-                    # Fallback: if no union polygon exists, discretize individual shells (slower but safe)
-                    for piece in entry['shells'][-len(shells):]:
-                        new_points.extend(self._discretize_edge(piece.exterior))
+                    for piece in part_shells:
+                        points.extend(self._discretize_edge(piece.exterior))
             else:
-                # CPU Path
+                # CPU path
                 master = nfp_data.get('polygon')
-                if not master: continue
+                if not master:
+                    continue
                 rotated = rotate(master, placed_angle, origin=(0, 0))
                 translated = translate(rotated, xoff=cent.x, yoff=cent.y)
-                if entry['polygon'].is_empty:
-                    entry['polygon'] = translated
+                if polygon.is_empty:
+                    polygon = translated
                 else:
-                    entry['polygon'] = entry['polygon'].union(translated)
-                # Discretize
-                new_points.extend(self._discretize_edge(translated.exterior))
+                    polygon = polygon.union(translated)
+                points.extend(self._discretize_edge(translated.exterior))
                 for interior in translated.interiors:
-                    new_points.extend(self._discretize_edge(interior))
-        
-        with sheet.nfp_cache_lock:
-            if new_points:
-                entry['points'].extend(new_points)
-                entry['prepared'] = None
-            entry['last_part_idx'] = target_idx
-        return entry
+                    points.extend(self._discretize_edge(interior))
+
+        return {'polygon': polygon, 'points': points, 'per_part_nfps': per_part_nfps}
 
     def _get_decomposition(self, shape):
         """Returns convex parts of the shape's original_polygon, centered at (0,0)."""
@@ -267,57 +257,83 @@ class MinkowskiEngine:
                     hulls = angle_to_results.get(angle, [])
                     
                     if hulls:
-                        t_u0 = time.perf_counter()
-                        # GPU-003: GPU Union (conservative approximation)
-                        union_poly = nfp_gpu_taichi.union_convex_hulls_gpu(hulls)
-                        if union_poly is None:
-                            # Fallback to CPU
-                            if self.verbose:
-                                FreeCAD.Console.PrintLog("[MinkowskiEngine] GPU batch union fallback to CPU\n")
-                            union_poly = unary_union(hulls)
-                        t_union += (time.perf_counter() - t_u0) * 1000
+                        try:
+                            t_u0 = time.perf_counter()
+                            # GPU-003: GPU Union (conservative approximation)
+                            union_poly = nfp_gpu_taichi.union_convex_hulls_gpu(hulls)
+                            if union_poly is None:
+                                # Fallback to CPU
+                                if self.verbose:
+                                    FreeCAD.Console.PrintLog("[MinkowskiEngine] GPU batch union fallback to CPU\n")
+                                # NFP-010: Buffer hulls to avoid TopologyException
+                                union_poly = unary_union([h.buffer(1e-7) for h in hulls])
+                            
+                            t_union += (time.perf_counter() - t_u0) * 1000
 
-                        if not union_poly.is_valid:
-                            union_poly = union_poly.buffer(0)
-                        
-                        nfp_data = {
-                            'shells': hulls,
-                            'holes': [],  # IFP for holes not pre-calculated in batch path
-                            'polygon': union_poly,
-                            'points': [],
-                            'error': None
-                        }
-                        with Shape.nfp_cache_lock:
-                            if cache_key not in Shape.nfp_cache:
-                                Shape.nfp_cache[cache_key] = nfp_data
+                            if not union_poly.is_valid:
+                                union_poly = union_poly.buffer(0)
+                            
+                            nfp_data = {
+                                'shells': hulls,
+                                'holes': [],  # IFP for holes not pre-calculated in batch path
+                                'polygon': union_poly,
+                                'points': [],
+                                'error': None
+                            }
+                            with Shape.nfp_cache_lock:
+                                if cache_key not in Shape.nfp_cache:
+                                    Shape.nfp_cache[cache_key] = nfp_data
+                        except Exception as pair_err:
+                            self.log(f"Skipping pair {cache_key}: {pair_err}")
                                 
                 if self.verbose and t_union > 0:
                     self.log(f"GPU batch union total: {t_union:.1f}ms")
         except Exception as e:
             self.log(f"Batch NFP precompute error: {e}")
 
-    def score_candidates_gpu(self, part_to_place, rotation_candidates, sheet):
-        """Calculates scores for multiple candidates using GPU PIP scoring."""
+    def score_candidates_gpu(self, part_to_place, rotation_candidates):
+        """Calculates scores for multiple candidates using GPU PIP scoring.
+
+        rotation_candidates: list of (angle, points, nfp_entry) tuples.
+        nfp_entry is the dict already returned by get_global_nfp_for — do NOT
+        call get_global_nfp_for again here.
+        """
         if not self.use_gpu or not nfp_gpu_taichi:
              return None
-             
+
         import numpy as np
         best_overall = {'metric': float('inf')}
         dir_x, dir_y = self.search_direction
 
-        for angle, points in rotation_candidates:
-            nfp_entry = self.get_global_nfp_for(part_to_place, angle, sheet)
+        for angle, points, nfp_entry in rotation_candidates:
             
-            # GPU-002: Use shells/holes from the sheet-level accumulated cache
-            shell_pieces = nfp_entry.get('shells', [])
-            hole_pieces = nfp_entry.get('holes', [])
-            
+            # NEW — per-part collision evaluation
             pts_np = np.array([[p.x, p.y] for p in points], dtype=np.float32)
-            if shell_pieces:
-                results = nfp_gpu_taichi.compute_batch_pip_with_holes(pts_np, shell_pieces, hole_pieces)
-            else:
-                # No cached shells — sheet is empty or cache miss; no collision
+            per_part = nfp_entry.get('per_part_nfps', [])
+
+            if not per_part:
                 results = np.zeros(len(points), dtype=np.int32)
+            elif not any(p['holes'] for p in per_part):
+                # Fast path: no placed part has holes — single combined PIP call
+                all_shells = [s for p in per_part for s in p['shells']]
+                results = (nfp_gpu_taichi.compute_batch_pip(pts_np, all_shells)
+                           if all_shells else np.zeros(len(points), dtype=np.int32))
+            else:
+                # Slow path: at least one placed part has holes — must test per-part
+                rejected = np.zeros(len(points), dtype=np.int32)
+
+                no_hole_shells = [s for p in per_part if not p['holes'] for s in p['shells']]
+                if no_hole_shells:
+                    rejected |= nfp_gpu_taichi.compute_batch_pip(pts_np, no_hole_shells)
+
+                for nfp_pair in per_part:
+                    if not nfp_pair['holes']:
+                        continue  # already handled above
+                    if nfp_pair['shells']:
+                        rejected |= nfp_gpu_taichi.compute_batch_pip_with_holes(
+                            pts_np, nfp_pair['shells'], nfp_pair['holes']
+                        )
+                results = rejected
             
             # GPU-005: Batch container bounds check
             rotated_poly = rotate(part_to_place.original_polygon, angle, origin='centroid')
