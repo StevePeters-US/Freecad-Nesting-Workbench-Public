@@ -277,8 +277,62 @@ class MinkowskiEngine:
                      f"total={dt_total:.1f}ms candidates={len(points)}")
         return {'polygon': polygon, 'points': points, 'per_part_nfps': per_part_nfps}
 
+    # Maximum exterior vertices to use when decomposing a shape for GPU NFP.
+    # Triangulation produces O(N) triangles → O(N²) shell pairs for identical shapes.
+    # 16 verts → ~32 shells for an O-with-hole (vs 1024 at 27 verts).
+    # A small outward buffer (step_size/2) is applied after resampling to compensate
+    # for the chord-to-arc inscribed-polygon approximation error that causes overlaps.
+    _DECOMP_MAX_VERTS = 16
+
+    @staticmethod
+    def _resample_ring(ring, max_verts):
+        """Resample a LinearRing to at most max_verts equally-spaced points."""
+        n = len(ring.coords) - 1  # exclude closing coord
+        if n <= max_verts:
+            return list(ring.coords[:-1])
+        length = ring.length
+        step = length / max_verts
+        pts = [ring.interpolate(i * step) for i in range(max_verts)]
+        return [(p.x, p.y) for p in pts]
+
+    def _resample_for_decomp(self, poly):
+        """Return a simplified copy of poly with at most _DECOMP_MAX_VERTS per ring.
+
+        Only applied when the polygon has more vertices than the cap — preserves
+        the original when it's already small. Interior rings (holes) are also capped
+        so the ring shape doesn't produce excess triangles along the inner boundary.
+
+        After resampling, a small outward buffer is added to compensate for the
+        chord-to-arc error: arc-length resampling produces an inscribed polygon
+        (corners clipped inward), which underestimates the NFP exclusion zone and
+        causes slight overlaps. The buffer expands the exclusion zone conservatively.
+        """
+        max_v = self._DECOMP_MAX_VERTS
+        ext_n = len(poly.exterior.coords) - 1
+        hole_ns = [len(h.coords) - 1 for h in poly.interiors]
+        if ext_n <= max_v and all(n <= max_v for n in hole_ns):
+            return poly  # already within cap
+        new_ext = self._resample_ring(poly.exterior, max_v)
+        new_ext.append(new_ext[0])  # close
+        new_holes = []
+        for interior in poly.interiors:
+            pts = self._resample_ring(interior, max_v)
+            pts.append(pts[0])
+            new_holes.append(pts)
+        result = Polygon(new_ext, new_holes)
+        if not result.is_valid:
+            result = result.buffer(0)
+        # Outward buffer compensates for inscribed-polygon approximation error.
+        # Magnitude: half the max chord-to-arc sag, approximated as step_size/2.
+        result = result.buffer(self.step_size * 0.5)
+        return result
+
     def _get_decomposition(self, shape):
-        """Returns convex parts of the shape's original_polygon, centered at (0,0)."""
+        """Returns convex parts of the shape's original_polygon, centered at (0,0).
+
+        The polygon is resampled to _DECOMP_MAX_VERTS before triangulation so that
+        complex shapes (rings, circles) don't produce O(N²) shell pairs.
+        """
         if not shape.original_polygon:
             return []
         shape_id = shape.source_freecad_object.Label
@@ -288,7 +342,13 @@ class MinkowskiEngine:
         master = shape.original_polygon
         cent = master.centroid
         centered = translate(master, -cent.x, -cent.y)
-        parts = minkowski_utils.decompose_if_needed(centered, self.log)
+        resampled = self._resample_for_decomp(centered)
+        orig_verts = len(centered.exterior.coords) - 1
+        new_verts = len(resampled.exterior.coords) - 1
+        if orig_verts != new_verts:
+            self.log(f"[DECOMP] '{shape_id}': {orig_verts} → {new_verts} verts before triangulation")
+        parts = minkowski_utils.decompose_if_needed(resampled, self.log)
+        self.log(f"[DECOMP] '{shape_id}': {len(parts)} convex parts")
         with self._decomp_lock:
             self._decomp_cache[shape_id] = parts
         return parts
