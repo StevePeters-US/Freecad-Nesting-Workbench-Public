@@ -926,17 +926,24 @@ class NestingController:
             
             # sys.executable in FreeCAD often points to FreeCAD.exe.
             # We need the python.exe in the same directory (bin).
-            import os
             bin_dir = os.path.dirname(sys.executable)
-            python_exe = os.path.join(bin_dir, "python.exe")
+            python_exe = sys.executable
             
-            # Fallback if python.exe not found
-            if not os.path.exists(python_exe):
-                 python_exe = sys.executable 
+            # Search for a better executable for pip if sys.executable is 'freecad'
+            # Look for python.exe, python3, python, or FreeCADCmd
+            for exe in ["python.exe", "python3", "python", "FreeCADCmd"]:
+                exe_path = os.path.join(bin_dir, exe)
+                if os.path.exists(exe_path):
+                    python_exe = exe_path
+                    break
 
             # Run pip install
             # Use --no-warn-script-location to avoid warnings about PATH
-            subprocess.check_call([python_exe, "-m", "pip", "install", "taichi", "--no-warn-script-location"])
+            cmd = [python_exe, "-m", "pip", "install", "taichi", "--user", "--no-warn-script-location"]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                error_msg = f"Command failed with exit code {result.returncode}.\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+                raise Exception(error_msg)
             
             FreeCAD.Console.PrintMessage("Successfully installed dependencies.\n")
             self.ui.status_label.setText("Dependencies Installed!")
