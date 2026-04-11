@@ -40,7 +40,7 @@ class BaseNester(object):
     def log(self, message):
         FreeCAD.Console.PrintMessage(f"NESTING: {message}\n")
 
-    def nest(self, parts):
+    def nest(self, parts, sort=True):
         """
         Main greedy nesting loop.
         """
@@ -48,7 +48,8 @@ class BaseNester(object):
         self.sheets = []
         
         # Sort biggest first
-        self.parts_to_place.sort(key=lambda p: p.area, reverse=True)
+        if sort:
+            self.parts_to_place.sort(key=lambda p: p.area, reverse=True)
         
         unplaced_parts = []
         total_count = len(self.parts_to_place)
@@ -106,21 +107,22 @@ class BaseNester(object):
     def _evaluate_placement(self, shape, direction):
         """
         Evaluates a placement based on the centroid's position in gravity direction.
-        Higher score = further along the direction vector.
-        Uses the shape's centroid (part origin) as requested.
-        Includes a small tie-breaker to favor the sheet origin (packing to the side).
+        Decouples vertical progress from the side-packing tie-breaker.
         """
         center = shape.centroid
         if not center:
             return -float('inf')
             
-        # 1. Primary score: distance along gravity direction
+        # 1. Primary score: distance along gravity direction (MAXIMIZE)
+        # (e.g. if direction is (0,-1), this yields -y. Highest score at lowest y)
         primary_score = center.x * direction[0] + center.y * direction[1]
         
-        # 2. Tie-breaker: small penalty for distance from origin
-        # (center.x + center.y) effectively pushes to the bottom-left corner
-        # if gravity is downward.
-        tie_breaker = -(abs(center.x) + abs(center.y)) * 0.001
+        # 2. Tie-breaker: perpendicular progress (STRICTLY SIDE-PACKING)
+        # We pack towards the origin (0,0) by penalizing perpendicular distance.
+        # This prevents horizontal drift from interfering with vertical fitness.
+        perp = (-direction[1], direction[0])
+        dist_perp = center.x * perp[0] + center.y * perp[1]
+        tie_breaker = -abs(dist_perp) * 0.0001
         
         return primary_score + tie_breaker
 
@@ -159,11 +161,12 @@ class BaseNester(object):
                 self.log("Annealing cancelled.")
                 break
 
-            # PROGRESSIVE AMPLITUDE (Inverse Annealing / Expanding Radius)
-            # Starts with tiny local wiggles (progress ~ 0)
-            # Ends with wide global jumps (progress ~ 1.0)
+            # QUADRATIC AMPLITUDE (Explosive Expansion)
+            # Starts with tiny local wiggles (progress^2 ~ 0)
+            # Ends with wide global jumps (progress^2 * 50x base step)
+            # e.g. at 25 steps, progress=1.0, step_size=5 -> amp=250mm
             progress = (i + 1) / self.anneal_steps
-            amplitude = self.step_size * progress * 10.0 
+            amplitude = self.step_size * (progress ** 2) * 50.0 
             
             # --- 1. SHAKE (Pick a new candidate position) ---
             part.move_to(current_state[0], current_state[1])

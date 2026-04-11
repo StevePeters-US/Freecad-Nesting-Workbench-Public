@@ -109,6 +109,7 @@ class VisualizationManager:
                             boundary.ViewObject.LineColor = (0.0, 0.8, 0.0)  # Green
                             boundary.ViewObject.LineWidth = 3.0
                         else:
-                            boundary.ViewObject.Visibility = False
-                            boundary.ViewObject.LineColor = (1.0, 0.0, 0.0)  # Red
+                            # Don't hide — placed parts must stay visible.
+                            # Just remove the highlight glow (restore normal appearance).
+                            boundary.ViewObject.LineColor = (0.0, 0.7, 0.0)
                             boundary.ViewObject.LineWidth = 2.0

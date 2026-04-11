@@ -113,6 +113,8 @@ def nest(parts, width, height, rotation_steps=1, simulate=False, algorithm='Mink
     # Only clear NFP cache if explicitly requested by the user (expensive to recompute)
     if kwargs.pop('clear_nfp_cache', False):
         Shape.clear_nfp_cache()
+
+    sort = kwargs.pop('sort', True)
     
     # If simulation is enabled, the nester needs the original list of parts
     # that are linked to the visible FreeCAD objects (fc_object).
@@ -148,7 +150,7 @@ def nest(parts, width, height, rotation_steps=1, simulate=False, algorithm='Mink
 
     import time
     start_time = time.monotonic()
-    result = nester.nest(parts_to_process)
+    result = nester.nest(parts_to_process, sort=sort)
     elapsed = time.monotonic() - start_time
     
     # Cleanup trial visualization and highlighting

@@ -76,8 +76,9 @@ class GACoordinator:
         generations = algo_kwargs.get('generations', 1)
         population_size = algo_kwargs.get('population_size', 1)
         rotation_steps = ui_params.get('rotation_steps', 1)
-        elite_count = max(1, population_size // 5)  # Keep top 20%
+        elite_count = max(2, population_size // 5)  # Keep top 20%, minimum 2 for crossover
         mutation_rate = 0.1
+        immigrant_ratio = 0.15  # 15% of new generation are random immigrants
         early_stop_threshold = 5
         verbose = algo_kwargs.get('verbose', False)
         cancel_callback = algo_kwargs.get('cancel_callback', lambda: False)
@@ -127,10 +128,7 @@ class GACoordinator:
 
                     if verbose:
                         FreeCAD.Console.PrintMessage(f"  [Gen {gen+1}] Layout {idx+1}/{len(layouts)}: {layout.name}\n")
-                    
-                    # Store genes (ordering and rotations) for this layout
-                    layout.genes = [(p.id, getattr(p, '_angle', 0)) for p in layout.parts] if layout.parts else []
-                    
+
                     # Skip if already nested (e.g., winner from previous generation)
                     if layout.sheets:
                         if verbose:
@@ -145,11 +143,14 @@ class GACoordinator:
                     # Run nesting
                     current_algo_kwargs = algo_kwargs.copy()
                     if population_size > 1 or generations > 1:
-                         # In GA mode, don't spam the fine-grained progress bar, 
+                         # In GA mode, don't spam the fine-grained progress bar,
                          # just use the status label updates we already have in the loop.
                          current_algo_kwargs['quiet'] = True
                          if 'progress_callback' in current_algo_kwargs:
                              del current_algo_kwargs['progress_callback']
+                    # Honour gene ordering for layouts that have pre-set chromosome ordering
+                    if layout.genes:
+                        current_algo_kwargs['sort'] = False
                     
                     sheets, unplaced, _, elapsed = nest(
                         layout.parts,
@@ -175,6 +176,19 @@ class GACoordinator:
                     
                     layout.sheets = sheets
                     layout.unplaced = unplaced  # Track unplaced parts
+
+                    # Capture genes AFTER nesting so angles reflect optimizer-assigned values
+                    if is_simulating:
+                        layout.genes = [(p.id, getattr(p, '_angle', 0)) for p in layout.parts] if layout.parts else []
+                    else:
+                        # non-sim path: nest() uses deepcopy; read angles from placed parts in sheets
+                        gene_map = {}
+                        for s in layout.sheets:
+                            for placed_part in s.parts:
+                                pid = placed_part.shape.id
+                                gene_map[pid] = getattr(placed_part.shape, '_angle', 0)
+                        layout.genes = [(p.id, gene_map.get(p.id, getattr(p, '_angle', 0)))
+                                        for p in layout.parts] if layout.parts else []
                     
                     # Calculate efficiency
                     fitness, efficiency = layout_manager.calculate_efficiency(
@@ -228,31 +242,70 @@ class GACoordinator:
                 if best_layout and best_layout.layout_group:
                     if hasattr(best_layout.layout_group, "ViewObject"):
                         best_layout.layout_group.ViewObject.Visibility = False
-                
-                # STEP 2: Delete all non-winner layouts from this generation
+
+                # STEP 2: Select elite pool
+                actual_elite = min(elite_count, len(layouts))
+                elites = layouts[:actual_elite]  # already sorted by fitness
                 if verbose:
-                    FreeCAD.Console.PrintMessage(f"  Deleting {len(layouts) - 1} non-winning layouts...\n")
-                for layout in layouts:
-                    if layout != best_layout:
-                        layout_manager.delete_layout(layout, verbose=verbose)
-                
-                # STEP 3: Create new layouts for next generation (if not last)
+                    FreeCAD.Console.PrintMessage(
+                        f"  Elites ({actual_elite}): " +
+                        ", ".join(f"{e.name}({e.efficiency:.1f}%)" for e in elites) + "\n"
+                    )
+
+                # STEP 3: Build next generation
                 if gen < generations - 1:
-                    layouts = [best_layout]  # Start with the winner
-                    
-                    for i in range(population_size - 1):
-                        new_layout = layout_manager.create_layout(
-                            f"Layout_GA_{gen+2}_{i+1}",
+                    ranked_pool = [(e.fitness, e.genes) for e in elites if e.genes]
+
+                    # Champion carries forward with sheets intact (skip re-nesting next gen)
+                    new_layouts = [elites[0]]
+
+                    # Delete non-champion elites' FreeCAD objects (genes already captured)
+                    for e in elites[1:]:
+                        layout_manager.delete_layout(e, verbose=verbose)
+                    for layout in layouts:
+                        if layout not in elites:
+                            layout_manager.delete_layout(layout, verbose=verbose)
+
+                    # Offspring via crossover + mutation
+                    n_immigrants = max(1, int((population_size - 1) * immigrant_ratio))
+                    n_offspring = max(0, (population_size - 1) - n_immigrants)
+
+                    for i in range(n_offspring):
+                        k = min(3, len(ranked_pool))
+                        if len(ranked_pool) >= 2:
+                            p1 = genetic_utils.tournament_selection(ranked_pool, k=k)
+                            p2 = genetic_utils.tournament_selection(ranked_pool, k=k)
+                            child_genes = genetic_utils.crossover_genes(p1, p2)
+                        else:
+                            child_genes = list(ranked_pool[0][1]) if ranked_pool else []
+                        child_genes = genetic_utils.mutate_genes(child_genes, mutation_rate, rotation_steps)
+                        child_layout = layout_manager.create_layout(
+                            f"Layout_GA_{gen+2}_c{i+1}",
+                            master_map, quantities, ui_params,
+                            chromosome_ordering=child_genes
+                        )
+                        new_layouts.append(child_layout)
+
+                    # Random immigrants for diversity
+                    for i in range(n_immigrants):
+                        imm = layout_manager.create_layout(
+                            f"Layout_GA_{gen+2}_i{i+1}",
                             master_map, quantities, ui_params
                         )
-                        # Shuffle and mutate
-                        if new_layout.parts:
-                            random.shuffle(new_layout.parts)
+                        if imm.parts:
+                            random.shuffle(imm.parts)
                             if rotation_steps > 1:
-                                genetic_utils.mutate_chromosome(new_layout.parts, mutation_rate, rotation_steps)
-                        layouts.append(new_layout)
+                                for part in imm.parts:
+                                    angle = random.randrange(rotation_steps) * (360.0 / rotation_steps)
+                                    part.set_rotation(angle)
+                        new_layouts.append(imm)
+
+                    layouts = new_layouts
                 else:
-                    # Last generation - just keep the winner
+                    # Last generation — delete all non-winners
+                    for layout in layouts:
+                        if layout != best_layout:
+                            layout_manager.delete_layout(layout, verbose=verbose)
                     layouts = [best_layout]
             
             # STEP 4: Final result - winner becomes Layout_temp
