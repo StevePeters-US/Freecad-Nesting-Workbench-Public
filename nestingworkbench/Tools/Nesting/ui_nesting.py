@@ -111,20 +111,6 @@ class NestingPanel(QtGui.QWidget):
         # Angles: 360 (1 step), 180 (2), 120 (3), 90 (4), 45 (8), 30 (12), 15 (24), 10 (36), 5 (72), 1 (360)
         self.rotation_angles = _DEFAULTS["rotation_angles"]
         
-        self.rotation_steps_slider = QtGui.QSlider(QtCore.Qt.Horizontal)
-        self.rotation_steps_slider.setRange(0, len(self.rotation_angles) - 1) 
-        self.rotation_steps_slider.setValue(0) # Default to 360 (1 step)
-        self.rotation_steps_slider.setTickPosition(QtGui.QSlider.TicksBelow)
-        self.rotation_steps_slider.setTickInterval(1)
-        self.rotation_steps_slider.setSingleStep(1)
-        self.rotation_steps_slider.setPageStep(1)
-        
-        self.rotation_display_label = QtGui.QLabel("360° (1 step)")
-        self.rotation_display_label.setFixedWidth(100) # Prevent jumping layout
-        self.rotation_display_label.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-
-        self.rotation_steps_slider.valueChanged.connect(self._update_rotation_label)
-        
 
 
 
@@ -189,6 +175,19 @@ class NestingPanel(QtGui.QWidget):
         self.minkowski_generations_input.setValue(1) # Default to 1 (No Genetic Loop)
         self.minkowski_generations_input.setToolTip("Set to 1 for a single pass. Increase to optimize using Genetic Algorithm.")
 
+        # Rotation Steps for Minkowski
+        self.minkowski_rotation_steps_slider = QtGui.QSlider(QtCore.Qt.Horizontal)
+        self.minkowski_rotation_steps_slider.setRange(0, len(self.rotation_angles) - 1)
+        self.minkowski_rotation_steps_slider.setValue(3) # Default 90 deg
+        self.minkowski_rotation_display_label = QtGui.QLabel("")
+        self.minkowski_rotation_display_label.setFixedWidth(100)
+        self.minkowski_rotation_steps_slider.valueChanged.connect(lambda: self._update_rotation_label())
+
+        mink_rot_layout = QtGui.QHBoxLayout()
+        mink_rot_layout.addWidget(self.minkowski_rotation_steps_slider)
+        mink_rot_layout.addWidget(self.minkowski_rotation_display_label)
+        minkowski_form_layout.addRow("Rotation Angle:", mink_rot_layout)
+
         minkowski_form_layout.addRow(QtGui.QLabel("")) # Spacer
         minkowski_form_layout.addRow(QtGui.QLabel("--- Optimization ---"))
         minkowski_form_layout.addRow("Generations:", self.minkowski_generations_input)
@@ -231,15 +230,38 @@ class NestingPanel(QtGui.QWidget):
         self.anneal_rotate_checkbox = QtGui.QCheckBox("Anneal Rotate"); self.anneal_rotate_checkbox.setChecked(True)
         self.anneal_translate_checkbox = QtGui.QCheckBox("Anneal Translate"); self.anneal_translate_checkbox.setChecked(True)
         self.anneal_random_shake_checkbox = QtGui.QCheckBox("Random Shake Direction")
+        
+        self.physics_stability_tolerance_input = QtGui.QDoubleSpinBox()
+        self.physics_stability_tolerance_input.setRange(0.000001, 1.0)
+        self.physics_stability_tolerance_input.setValue(0.0001)
+        self.physics_stability_tolerance_input.setSingleStep(0.0001)
+        self.physics_stability_tolerance_input.setDecimals(6)
+        self.physics_stability_tolerance_input.setToolTip("Minimum score improvement required to reset simulation cycle. Prevents infinite loops from noise.")
 
         physics_form_layout.addRow("Gravity Direction:", physics_dial_layout)
         physics_form_layout.addRow(self.physics_random_checkbox)
+        
+        # Rotation Steps for Physics
+        # Mapping: 1, 4 (90), 8 (45), 12 (30), 24 (15), 36 (10), 72 (5), 180 (2), 360 (1)
+        self.physics_rotation_steps_slider = QtGui.QSlider(QtCore.Qt.Horizontal)
+        self.physics_rotation_steps_slider.setRange(0, 8) 
+        self.physics_rotation_steps_slider.setValue(1) # Default 90 deg (4 steps)
+        self.physics_rotation_display_label = QtGui.QLabel("")
+        self.physics_rotation_display_label.setFixedWidth(120)
+        self.physics_rotation_steps_slider.valueChanged.connect(lambda: self._update_rotation_label())
+
+        phys_rot_layout = QtGui.QHBoxLayout()
+        phys_rot_layout.addWidget(self.physics_rotation_steps_slider)
+        phys_rot_layout.addWidget(self.physics_rotation_display_label)
+        physics_form_layout.addRow("Rotation Steps:", phys_rot_layout)
+
         physics_form_layout.addRow("Step Size:", self.physics_step_size_input)
         physics_form_layout.addRow("Max Spawn Attempts:", self.physics_max_spawn_input)
         physics_form_layout.addRow("Max Nesting Steps:", self.physics_max_nesting_steps_input)
         physics_form_layout.addRow(QtGui.QLabel("")) # Spacer
         physics_form_layout.addRow(QtGui.QLabel("--- Annealing (Shake) ---"))
         physics_form_layout.addRow("Anneal Steps:", self.physics_anneal_steps_input)
+        physics_form_layout.addRow("Stability Tolerance:", self.physics_stability_tolerance_input)
         physics_form_layout.addRow(self.anneal_rotate_checkbox)
         physics_form_layout.addRow(self.anneal_translate_checkbox)
         physics_form_layout.addRow(self.anneal_random_shake_checkbox)
@@ -314,10 +336,6 @@ class NestingPanel(QtGui.QWidget):
         form_layout.addRow("Identifier Font:", font_layout)
         form_layout.addRow(label_options_layout)
         
-        rotation_layout = QtGui.QHBoxLayout()
-        rotation_layout.addWidget(self.rotation_steps_slider)
-        rotation_layout.addWidget(self.rotation_display_label)
-        form_layout.addRow("Global Rotation Steps:", rotation_layout)
 
         form_layout.addRow(self.simulate_nesting_checkbox)
         form_layout.addRow(self.verbose_logging_checkbox)
@@ -381,8 +399,10 @@ class NestingPanel(QtGui.QWidget):
             except ImportError:
                 self.install_taichi_button.setEnabled(True)
         
-        # Load persisted settings after all widgets are created
         self.load_persisted_settings()
+        
+        # Ensure initial labels are correct
+        self._update_rotation_label()
         
         # Load initial selection
         self.controller.load_selection()
@@ -525,11 +545,13 @@ class NestingPanel(QtGui.QWidget):
         self.simplification_input.setValue(prefs.GetFloat(PROP_SIMPLIFICATION, 1.0))
         self.use_gpu_checkbox.setChecked(prefs.GetBool(PROP_USE_GPU, False))
         self.verbose_logging_checkbox.setChecked(prefs.GetBool("VerboseLogging", False))
+        self.physics_stability_tolerance_input.setValue(prefs.GetFloat("PhysicsStabilityTolerance", 0.0001))
         
-        # Load Rotation Steps
-        rot_steps = prefs.GetInt("RotationSteps", 0)
-        if rot_steps > 0:
-            target_angle = 360.0 / rot_steps
+        # Load Rotation Steps (Isolated)
+        # Minkowski
+        mink_rot_steps = prefs.GetInt("MinkowskiRotationSteps", 4) # Default 90 deg (4 steps)
+        if mink_rot_steps > 0:
+            target_angle = 360.0 / mink_rot_steps
             closest_idx = 0
             min_diff = float('inf')
             for i, angle in enumerate(self.rotation_angles):
@@ -537,7 +559,21 @@ class NestingPanel(QtGui.QWidget):
                 if diff < min_diff:
                     min_diff = diff
                     closest_idx = i
-            self.rotation_steps_slider.setValue(closest_idx)
+            self.minkowski_rotation_steps_slider.setValue(closest_idx)
+            
+        # Physics
+        phys_rot_steps = prefs.GetInt("PhysicsRotationSteps", 4) # Default 90 deg (4 steps)
+        if phys_rot_steps > 0:
+            target_angle = 360.0 / phys_rot_steps
+            phys_angles = [360, 90, 45, 30, 15, 10, 5, 2, 1]
+            closest_idx = 0
+            min_diff = float('inf')
+            for i, angle in enumerate(phys_angles):
+                diff = abs(angle - target_angle)
+                if diff < min_diff:
+                    min_diff = diff
+                    closest_idx = i
+            self.physics_rotation_steps_slider.setValue(closest_idx)
         
     def update_progress(self, current, total, message=None):
         """Updates the progress bar."""
@@ -562,29 +598,22 @@ class NestingPanel(QtGui.QWidget):
         except Exception as e:
             FreeCAD.Console.PrintWarning(f"UI Update Error: {e}\n")
 
-    def _update_rotation_label(self, value=None):
-        if value is None:
-            value = self.rotation_steps_slider.value()
-            
+    def _update_rotation_label(self):
         algo = self.algorithm_dropdown.currentText()
         
-        # Determine mapping based on algorithm
         if algo == "Physics":
-            # Physics mapping: explicit steps requested by user
+            value = self.physics_rotation_steps_slider.value()
             angles = [360, 90, 45, 30, 15, 10, 5, 2, 1]
+            if value < len(angles):
+                angle = angles[value]
+                steps = int(360 / angle) if angle > 0 else 1
+                self.physics_rotation_display_label.setText(f"{angle}° ({steps} steps)")
         else:
-            # Minkowski mapping: high resolution
+            value = self.minkowski_rotation_steps_slider.value()
             angles = self.rotation_angles
-            
-        if value < len(angles):
-            angle = angles[value]
-            steps = int(360 / angle) if angle > 0 else 1
-            
-            # Formatting: Minkowski preserves 'Angle' naming, Physics adds 'Steps' clarification
-            if algo == "Physics":
-                self.rotation_display_label.setText(f"{angle}° ({steps} steps)")
-            else:
-                self.rotation_display_label.setText(f"{angle}°")
+            if value < len(angles):
+                angle = angles[value]
+                self.minkowski_rotation_display_label.setText(f"{angle}°")
 
     def _on_algorithm_change(self, algo_name):
         """Handles switching between nesting algorithms."""

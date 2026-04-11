@@ -459,15 +459,29 @@ class NestingController:
                 steps = getattr(layout_group, PROP_GLOBAL_ROTATION_STEPS)
                 if steps > 0:
                     target_angle = 360.0 / steps
-                    # Find closest angle in self.ui.rotation_angles
+                    # Find closest angle in appropriate mapping
                     closest_idx = 0
                     min_diff = float('inf')
-                    for i, angle in enumerate(self.ui.rotation_angles):
-                        diff = abs(angle - target_angle)
-                        if diff < min_diff:
-                            min_diff = diff
-                            closest_idx = i
-                    self.ui.rotation_steps_slider.setValue(closest_idx)
+                    
+                    # Logic depends on algorithm of the layout
+                    is_physics = getattr(layout_group, "Algorithm", "") == "Physics"
+                    if is_physics:
+                        self.ui.algorithm_dropdown.setCurrentText("Physics")
+                        phys_angles = [360, 90, 45, 30, 15, 10, 5, 2, 1]
+                        for i, angle in enumerate(phys_angles):
+                            diff = abs(angle - target_angle)
+                            if diff < min_diff:
+                                min_diff = diff
+                                closest_idx = i
+                        self.ui.physics_rotation_steps_slider.setValue(closest_idx)
+                    else:
+                        self.ui.algorithm_dropdown.setCurrentText("Minkowski")
+                        for i, angle in enumerate(self.ui.rotation_angles):
+                            diff = abs(angle - target_angle)
+                            if diff < min_diff:
+                                min_diff = diff
+                                closest_idx = i
+                        self.ui.minkowski_rotation_steps_slider.setValue(closest_idx)
         else:
             FreeCAD.Console.PrintMessage(f"  WARNING: No MasterShapes group found!\n")
             self.ui.status_label.setText("Warning: Could not find 'MasterShapes' group in the selected layout.")
@@ -649,20 +663,21 @@ class NestingController:
     def _get_rotation_steps(self):
         """Returns the orientation count based on algorithm-specific angle mapping."""
         algo = self.ui.algorithm_dropdown.currentText()
-        idx = self.ui.rotation_steps_slider.value()
         
         if algo == "Physics":
-            # Mapping: 0->360(1), 1->90(4), 2->45(8), 3->30(12), 4->15(24), 5->10(36), 6->5(72), 7->2(180), 8->1(360)
+            idx = self.ui.physics_rotation_steps_slider.value()
+            # Mapping: 360(1), 90(4), 45(8), 30(12), 15(24), 10(36), 5(72), 2(180), 1(360)
             angles = [360, 90, 45, 30, 15, 10, 5, 2, 1]
             if idx < len(angles):
                 angle = angles[idx]
                 return int(360 / angle)
-        
-        # Default Minkowski/Common mapping
-        angles = self.ui.rotation_angles
-        if idx < len(angles):
-            angle = angles[idx]
-            return int(360 / angle)
+        else:
+            # Minkowski mapping
+            idx = self.ui.minkowski_rotation_steps_slider.value()
+            angles = self.ui.rotation_angles
+            if idx < len(angles):
+                angle = angles[idx]
+                return int(360 / angle)
         return 1
 
     def _execute_ga_nesting(self, target_layout, ui_params, quantities, master_map, 
@@ -857,7 +872,8 @@ class NestingController:
             'use_gpu': self.ui.use_gpu_checkbox.isChecked(),
             'verbose': self.ui.verbose_logging_checkbox.isChecked(),
             'nesting_direction': self.ui.minkowski_direction_dial.value(),
-            'algorithm': self.ui.algorithm_dropdown.currentText()
+            'algorithm': self.ui.algorithm_dropdown.currentText(),
+            'stability_tolerance': self.ui.physics_stability_tolerance_input.value()
         }
         
         # Save persistence
@@ -874,12 +890,21 @@ class NestingController:
         prefs.SetFloat(PROP_SHEET_THICKNESS, float(settings['sheet_thickness']))
         prefs.SetFloat(PROP_DEFLECTION_ANGLE, float(settings.get('deflection_angle', 10)))  # Save angle, not mm
         prefs.SetFloat(PROP_SIMPLIFICATION, float(settings['simplification']))
-        prefs.SetInt("RotationSteps", int(settings['rotation_steps']))
+        
+        # Save both isolated rotation settings
+        mink_steps = int(360 / self.ui.rotation_angles[self.ui.minkowski_rotation_steps_slider.value()])
+        prefs.SetInt("MinkowskiRotationSteps", mink_steps)
+        
+        phys_angles = [360, 90, 45, 30, 15, 10, 5, 2, 1]
+        phys_steps = int(360 / phys_angles[self.ui.physics_rotation_steps_slider.value()])
+        prefs.SetInt("PhysicsRotationSteps", phys_steps)
+
         prefs.SetBool(PROP_ADD_LABELS, bool(settings['add_labels']))
         prefs.SetBool(PROP_SHOW_BOUNDS, bool(settings['show_bounds']))
         prefs.SetFloat(PROP_LABEL_HEIGHT, float(settings['label_height']))
         prefs.SetFloat(PROP_LABEL_SIZE, float(settings['label_size']))
         prefs.SetBool(PROP_USE_GPU, bool(settings.get('use_gpu', False)))
+        prefs.SetFloat("PhysicsStabilityTolerance", float(settings.get('stability_tolerance', 0.0001)))
         if settings['font_path']:
              prefs.SetString("FontPath", str(settings['font_path']))
 
@@ -950,6 +975,7 @@ class NestingController:
             algo_kwargs['anneal_rotate_enabled'] = self.ui.anneal_rotate_checkbox.isChecked()
             algo_kwargs['anneal_translate_enabled'] = self.ui.anneal_translate_checkbox.isChecked()
             algo_kwargs['anneal_random_shake_direction'] = self.ui.anneal_random_shake_checkbox.isChecked()
+            algo_kwargs['stability_tolerance'] = ui_params.get('stability_tolerance', 0.0001)
         else:
             if self.ui.minkowski_random_checkbox.isChecked():
                 algo_kwargs['search_direction'] = None

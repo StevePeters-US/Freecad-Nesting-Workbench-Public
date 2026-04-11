@@ -76,7 +76,7 @@ class CollisionResolver:
                 if not other_bb:
                     continue
 
-                if self._bboxes_intersect(moved_bb, other_bb) and self._shapes_intersect(moved_obj, other):
+                if self._bboxes_intersect(moved_bb, other_bb):
                     any_overlap = True
                     # Calculate separation (XY only)
                     overlap_x = min(moved_bb['max_x'], other_bb['max_x']) - max(moved_bb['min_x'], other_bb['min_x']) + 0.001
@@ -109,7 +109,7 @@ class CollisionResolver:
         if not bb_a or not bb_b:
             return False
 
-        if self._bboxes_intersect(bb_a, bb_b) and self._shapes_intersect(obj_a, obj_b):
+        if self._bboxes_intersect(bb_a, bb_b):
             ox = min(bb_a['max_x'], bb_b['max_x']) - max(bb_a['min_x'], bb_b['min_x']) + 0.001
             oy = min(bb_a['max_y'], bb_b['max_y']) - max(bb_a['min_y'], bb_b['min_y']) + 0.001
 
@@ -128,55 +128,18 @@ class CollisionResolver:
             return True
         return False
 
-    def _find_shape_with_placement(self, obj, parent_placement):
-        """Mirrors _find_bbox_with_placement but returns (placement, Shape) instead of (placement, BoundBox).
-        Used to get the actual collision shape in world coordinates for precise intersection tests."""
-        if parent_placement is None:
-            current = obj.Placement
-        else:
-            current = parent_placement.multiply(obj.Placement)
-
-        if hasattr(obj, "BoundaryObject") and obj.BoundaryObject and hasattr(obj.BoundaryObject, "Shape"):
-            full = current.multiply(obj.BoundaryObject.Placement)
-            return full, obj.BoundaryObject.Shape
-
-        if hasattr(obj, "Group"):
-            for child in obj.Group:
-                result_placement, result_shape = self._find_shape_with_placement(child, current)
-                if result_shape is not None:
-                    return result_placement, result_shape
-
-        if hasattr(obj, "Shape") and hasattr(obj.Shape, "Wires") and obj.Shape.Wires:
-            return current, obj.Shape
-
-        return None, None
-
-    def _get_world_shape(self, obj):
-        """Returns the collision shape transformed to world coordinates, or None."""
-        placement, local_shape = self._find_shape_with_placement(obj, None)
-        if placement is None or local_shape is None:
-            return None
-        try:
-            return local_shape.transformed(placement.toMatrix())
-        except Exception:
-            return None
-
-    def _shapes_intersect(self, obj_a, obj_b):
-        """True if the actual shapes geometrically intersect, not just their bboxes.
-
-        Uses distToShape so a part sitting inside a hole in another part is correctly
-        treated as non-intersecting (distance > 0 to the hole boundary).
-        Falls back to True (conservative / assume intersection) when shapes are unavailable.
-        """
-        shape_a = self._get_world_shape(obj_a)
-        shape_b = self._get_world_shape(obj_b)
-        if shape_a is None or shape_b is None:
-            return True
-        try:
-            dist, _, _ = shape_a.distToShape(shape_b)
-            return dist < 0.01
-        except Exception:
-            return True
+    def overlaps_any(self, obj, others):
+        """Returns True if obj's bbox overlaps any bbox in others."""
+        bb = self._get_abs_bbox(obj)
+        if not bb:
+            return False
+        for other in others:
+            if other == obj:
+                continue
+            other_bb = self._get_abs_bbox(other)
+            if other_bb and self._bboxes_intersect(bb, other_bb):
+                return True
+        return False
 
     def _get_abs_bbox(self, obj):
         """Helper to get absolute bounding box as a dict.

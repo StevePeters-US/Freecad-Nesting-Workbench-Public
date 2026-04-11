@@ -44,6 +44,7 @@ class ManualNesterToolObserver:
         self.physics_engine = PhysicsEngine()
         self.collision_resolver = CollisionResolver()
         self.physics_enabled = True
+        self.auto_rotate_enabled = False
         self.obj_to_sheet = {} # Track which sheet each object belongs to
         self._drag_active_sheet = None # Sheet the cursor was last over during drag
 
@@ -80,6 +81,10 @@ class ManualNesterToolObserver:
             )
             ui.strength_spin.valueChanged.connect(
                 lambda val: setattr(self.physics_engine, 'strength', val)
+            )
+            self.auto_rotate_enabled = ui.auto_rotate_cb.isChecked()
+            ui.auto_rotate_cb.stateChanged.connect(
+                lambda state: setattr(self, 'auto_rotate_enabled', bool(state))
             )
 
         # 1. Infer Layout Group
@@ -301,7 +306,12 @@ class ManualNesterToolObserver:
             self._clamp_dragged_to_cursor_sheet(current_pos)
 
             if drag_delta.Length > 0.001:
-                self._apply_physics(drag_delta)
+                if self.physics_enabled:
+                    self._apply_physics(drag_delta)
+                    if self.auto_rotate_enabled:
+                        self._auto_rotate()
+                else:
+                    self._enforce_no_overlap()
 
             actual_pos = self.selected_obj.Placement.Base
 
@@ -522,6 +532,47 @@ class ManualNesterToolObserver:
         # Shape.BoundBox already includes placement (world coords)
         self.collision_resolver.clamp_to_sheet(self.selected_obj, boundary.Shape.BoundBox)
 
+    def _get_same_sheet_others(self):
+        """Return tracked objects on the same sheet as the currently dragged part, excluding it."""
+        dragged_sheet = self._drag_active_sheet or self.obj_to_sheet.get(self.selected_obj)
+        return [
+            o for o in self.original_placements
+            if o != self.selected_obj
+            and (not dragged_sheet or self.obj_to_sheet.get(o) == dragged_sheet)
+        ]
+
+    def _enforce_no_overlap(self):
+        """With physics off: highlight illegal positions but don't move other parts.
+        If the dragged part overlaps any neighbour, snap it back to its pre-drag placement."""
+        others = self._get_same_sheet_others()
+        if self.collision_resolver.overlaps_any(self.selected_obj, others):
+            # Snap back to where the drag started so the part can't be pushed into others
+            if self.selected_obj in self.pre_drag_placements:
+                self.selected_obj.Placement = self.pre_drag_placements[self.selected_obj].copy()
+
+    def _auto_rotate(self):
+        """Try rotating the dragged part in 15° steps (both directions) to find the
+        smallest rotation that resolves all overlaps with same-sheet parts.
+        If no rotation within ±180° resolves the overlap, the part is left as-is."""
+        others = self._get_same_sheet_others()
+        if not self.collision_resolver.overlaps_any(self.selected_obj, others):
+            return  # Already clear, nothing to do
+
+        base_placement = self.selected_obj.Placement.copy()
+        step = 15.0
+        # Try alternating: +15, -15, +30, -30, ...
+        for i in range(1, 13):  # up to ±180°
+            for sign in (1, -1):
+                angle_deg = sign * i * step
+                rot = FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), angle_deg)
+                trial = base_placement.copy()
+                trial.Rotation = rot.multiply(base_placement.Rotation)
+                self.selected_obj.Placement = trial
+                if not self.collision_resolver.overlaps_any(self.selected_obj, others):
+                    return  # Found a clear rotation
+        # Nothing worked — restore original
+        self.selected_obj.Placement = base_placement
+
     def _apply_physics(self, drag_delta):
         """Push nearby parts based on proximity to the dragged part."""
         if not self.physics_engine or not self.physics_enabled:
@@ -579,20 +630,16 @@ class ManualNesterToolObserver:
                     self.collision_resolver.clamp_to_sheet(obj, dragged_sheet_bbox)
                 displaced_objs.append(obj)
 
-        # Resolve overlaps between each part and the dragged part only.
-        # No chain reactions between neighbors — on a packed sheet those cascade
-        # into jumbled layouts and parts pushed off the boundary.
-        all_tracked = [
-            o for o in self.original_placements
-            if o != self.selected_obj
-            and (not dragged_sheet or self.obj_to_sheet.get(o) == dragged_sheet)
-        ]
+        # Resolve overlaps only within the set of displaced parts (inside influence radius).
+        # Parts outside the radius are never moved by chain reactions.
+        if not displaced_objs:
+            return
 
         for _ in range(3):
             any_separated = False
 
-            # Separate each part from the dragged part (dragged stays, others move)
-            for obj in all_tracked:
+            # Separate each radius-affected part from the dragged part
+            for obj in displaced_objs:
                 b = obj.Placement.Base
                 pos_before = (b.x, b.y, b.z)
                 self.collision_resolver.separate_overlapping(obj, [self.selected_obj])
@@ -602,10 +649,9 @@ class ManualNesterToolObserver:
                         self.collision_resolver.clamp_to_sheet(obj, dragged_sheet_bbox)
                     any_separated = True
 
-            # Resolve overlaps between neighbors, clamping both parts immediately
-            # so chain reactions can't push parts off the sheet boundary
-            for i, obj in enumerate(all_tracked):
-                for other in all_tracked[i+1:]:
+            # Resolve overlaps between displaced neighbors only
+            for i, obj in enumerate(displaced_objs):
+                for other in displaced_objs[i+1:]:
                     if self.collision_resolver.resolve_bi_collision(obj, other):
                         if dragged_sheet_bbox:
                             self.collision_resolver.clamp_to_sheet(obj, dragged_sheet_bbox)

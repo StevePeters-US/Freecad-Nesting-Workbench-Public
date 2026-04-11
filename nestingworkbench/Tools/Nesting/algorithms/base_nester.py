@@ -25,6 +25,7 @@ class BaseNester(object):
         self.anneal_rotate_enabled = kwargs.get("anneal_rotate_enabled", True)
         self.anneal_translate_enabled = kwargs.get("anneal_translate_enabled", True)
         self.anneal_random_shake_direction = kwargs.get("anneal_random_shake_direction", False)
+        self.stability_tolerance = kwargs.get("stability_tolerance", 0.0001)
         self.verbose = kwargs.get("verbose", False)
 
         self.parts_to_place = []
@@ -144,6 +145,10 @@ class BaseNester(object):
         best_state = (initial_x, initial_y, initial_angle)
 
         current_state = best_state
+        
+        # Minimum improvement required to be considered an "advantage" 
+        # Prevents infinite loops due to floating point noise.
+        EPSILON = self.stability_tolerance
 
         # LOGGING
         self.log(f"--- Annealing Cycle Start for {part.id} ---")
@@ -154,14 +159,17 @@ class BaseNester(object):
                 self.log("Annealing cancelled.")
                 break
 
-            progress = i / self.anneal_steps
+            # PROGRESSIVE AMPLITUDE (Inverse Annealing / Expanding Radius)
+            # Starts with tiny local wiggles (progress ~ 0)
+            # Ends with wide global jumps (progress ~ 1.0)
+            progress = (i + 1) / self.anneal_steps
+            amplitude = self.step_size * progress * 10.0 
             
             # --- 1. SHAKE (Pick a new candidate position) ---
             part.move_to(current_state[0], current_state[1])
             part.set_rotation(current_state[2])
 
             if translate_enabled:
-                amplitude = self.step_size * (1.0 - progress) * 1.5 
                 if self.anneal_random_shake_direction:
                     rand_angle = random.uniform(0, 2 * math.pi)
                     move_dir = (math.cos(rand_angle), math.sin(rand_angle))
@@ -173,28 +181,27 @@ class BaseNester(object):
 
             cand_x, cand_y, _, _ = part.bounding_box()
 
-            # --- 2. ROTATION SEARCH (Try all n angles at the new position) ---
+            # --- 2. ROTATION SEARCH (Try strict orientations) ---
             pos_best_score = -float('inf')
             pos_best_angle = None
             
             rot_steps_to_try = part.rotation_steps if (rotate_enabled and part.rotation_steps > 1) else 1
             
             for r in range(rot_steps_to_try):
-                angle = r * (360.0 / part.rotation_steps) if rot_steps_to_try > 1 else part.angle
-                part.set_rotation(angle)
+                target_angle = r * (360.0 / part.rotation_steps) if rot_steps_to_try > 1 else part.angle
+                part.set_rotation(target_angle)
                 
                 if sheet.is_placement_valid(part, part_to_ignore=part):
                     score = self._evaluate_placement(part, direction)
                     if score > pos_best_score:
                         pos_best_score = score
-                        pos_best_angle = part.angle
+                        pos_best_angle = target_angle
                         
                     # OPPORTUNISTIC EARLY EXIT: 
-                    # If this orientation at this position is already better than where we started,
-                    # take it and return to the main physics loop immediately!
-                    if score > starting_score:
-                        self.log(f"  Advantage found at PosStep {i:2d}, Rot {r:2d}: Score {score:8.3f} > {starting_score:8.3f}. EXITING EARLY.")
-                        best_state = (cand_x, cand_y, part.angle)
+                    # Requires strictly better score + EPSILON breakthrough
+                    if score > starting_score + EPSILON:
+                        self.log(f"  Advantage found at PosStep {i:2d} (Amp={amplitude:.1f}mm), Rot {r:2d}: Score {score:10.6f} > {starting_score:10.6f}. EXITING EARLY.")
+                        best_state = (cand_x, cand_y, target_angle)
                         part.move_to(best_state[0], best_state[1])
                         part.set_rotation(best_state[2])
                         return True
@@ -208,7 +215,7 @@ class BaseNester(object):
                     best_score = pos_best_score
                     best_state = current_state
                 
-                self.log(f"  PosStep {i:2d}: Pos=({cand_x:6.1f}, {cand_y:6.1f}), BestAngle={pos_best_angle:5.1f}, Score={pos_best_score:8.3f} (Wiggle)")
+                self.log(f"  PosStep {i:2d}: Pos=({cand_x:6.1f}, {cand_y:6.1f}), BestAngle={pos_best_angle:5.1f}, Score={pos_best_score:10.6f} (Wiggle)")
             else:
                 part.move_to(current_state[0], current_state[1])
                 part.set_rotation(current_state[2])
@@ -217,13 +224,13 @@ class BaseNester(object):
         
         # If we reached here, we finished all steps without an "advantage" jump.
         # Check if we at least found a marginally better spot than the start.
-        if best_score > starting_score:
-            self.log(f"Annealing finished with improvement. Best Score: {best_score:8.3f}")
+        if best_score > starting_score + EPSILON:
+            self.log(f"Annealing finished with improvement. Best Score: {best_score:10.6f}")
             part.move_to(best_state[0], best_state[1])
             part.set_rotation(best_state[2])
             return True
         else:
-            self.log(f"Annealing finished (no improvement). Baseline: {starting_score:8.3f}")
+            self.log(f"Annealing finished (no improvement). Baseline: {starting_score:10.6f}")
             part.move_to(initial_x, initial_y)
             part.set_rotation(initial_angle)
             return False

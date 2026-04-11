@@ -63,7 +63,12 @@ class ManualNesterToolUI(QtGui.QWidget):
         self.strength_spin.setSingleStep(0.1)
         strength_layout.addWidget(self.strength_spin)
         physics_layout.addLayout(strength_layout)
-        
+
+        # Auto-rotate
+        self.auto_rotate_cb = QtGui.QCheckBox("Auto-rotate to fit")
+        self.auto_rotate_cb.setChecked(False)
+        physics_layout.addWidget(self.auto_rotate_cb)
+
         physics_group.setLayout(physics_layout)
         main_layout.addWidget(physics_group)
 
