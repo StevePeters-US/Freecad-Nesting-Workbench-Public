@@ -148,6 +148,7 @@ class GACoordinator:
                         ui_params['sheet_height'],
                         rotation_steps,
                         is_simulating,
+                        algorithm=ui_params.get('algorithm', 'Minkowski'),
                         **current_algo_kwargs
                     )
 

@@ -809,7 +809,8 @@ class NestingController:
             'population_size': self.ui.minkowski_population_size_input.value(),
             'use_gpu': self.ui.use_gpu_checkbox.isChecked(),
             'verbose': self.ui.verbose_logging_checkbox.isChecked(),
-            'nesting_direction': self.ui.minkowski_direction_dial.value()
+            'nesting_direction': self.ui.minkowski_direction_dial.value(),
+            'algorithm': self.ui.algorithm_dropdown.currentText()
         }
         
         # Save persistence
@@ -883,18 +884,39 @@ class NestingController:
 
     def _prepare_algo_kwargs(self, ui_params):
         algo_kwargs = {}
-        if self.ui.minkowski_random_checkbox.isChecked():
-            algo_kwargs['search_direction'] = None
-        else:
-            angle_deg = (270 - self.ui.minkowski_direction_dial.value()) % 360
-            angle_rad = math.radians(angle_deg)
-            algo_kwargs['search_direction'] = (math.cos(angle_rad), math.sin(angle_rad))
+        algorithm = ui_params.get('algorithm', 'Minkowski')
         
-        algo_kwargs['population_size'] = self.ui.minkowski_population_size_input.value()
-        algo_kwargs['generations'] = self.ui.minkowski_generations_input.value()
+        if algorithm == 'Physics':
+            if self.ui.physics_random_checkbox.isChecked():
+                algo_kwargs['physics_direction'] = None 
+            else:
+                # Dial value is CCW from 6 o'clock. 
+                # 0=Down(0,-1), 90=Left(-1,0), 180=Up(0,1), 270=Right(1,0)
+                angle_deg = (270 - self.ui.physics_direction_dial.value()) % 360
+                angle_rad = math.radians(angle_deg)
+                algo_kwargs['physics_direction'] = (math.cos(angle_rad), math.sin(angle_rad))
+            
+            algo_kwargs['step_size'] = self.ui.physics_step_size_input.value()
+            algo_kwargs['max_spawn_count'] = self.ui.physics_max_spawn_input.value()
+            algo_kwargs['max_nesting_steps'] = self.ui.physics_max_nesting_steps_input.value()
+            algo_kwargs['anneal_steps'] = self.ui.physics_anneal_steps_input.value()
+            algo_kwargs['anneal_rotate_enabled'] = self.ui.anneal_rotate_checkbox.isChecked()
+            algo_kwargs['anneal_translate_enabled'] = self.ui.anneal_translate_checkbox.isChecked()
+            algo_kwargs['anneal_random_shake_direction'] = self.ui.anneal_random_shake_checkbox.isChecked()
+        else:
+            if self.ui.minkowski_random_checkbox.isChecked():
+                algo_kwargs['search_direction'] = None
+            else:
+                angle_deg = (270 - self.ui.minkowski_direction_dial.value()) % 360
+                angle_rad = math.radians(angle_deg)
+                algo_kwargs['search_direction'] = (math.cos(angle_rad), math.sin(angle_rad))
+            
+            algo_kwargs['population_size'] = self.ui.minkowski_population_size_input.value()
+            algo_kwargs['generations'] = self.ui.minkowski_generations_input.value()
+            algo_kwargs['clear_nfp_cache'] = self.ui.clear_cache_checkbox.isChecked()
+            algo_kwargs['use_gpu'] = ui_params.get('use_gpu', False)
+
         algo_kwargs['spacing'] = ui_params['spacing']
-        algo_kwargs['clear_nfp_cache'] = self.ui.clear_cache_checkbox.isChecked()
-        algo_kwargs['use_gpu'] = ui_params.get('use_gpu', False)
         
         if hasattr(self.ui, 'log_message'):
             algo_kwargs['log_callback'] = self.ui.log_message

@@ -60,6 +60,14 @@ class NestingPanel(QtGui.QWidget):
     def initUI(self):
         main_layout = QtGui.QVBoxLayout()
         form_layout = QtGui.QFormLayout()
+        
+        # Algorithm Selection
+        self.algorithm_dropdown = QtGui.QComboBox()
+        self.algorithm_dropdown.addItems(["Minkowski", "Physics"])
+        self.algorithm_dropdown.setCurrentIndex(1) # Default to Physics
+        self.algorithm_dropdown.currentTextChanged.connect(self._on_algorithm_change)
+        form_layout.addRow("Nesting Algorithm:", self.algorithm_dropdown)
+
         font_layout = QtGui.QHBoxLayout()
         table_button_layout = QtGui.QHBoxLayout()
         action_button_layout = QtGui.QHBoxLayout()
@@ -188,6 +196,60 @@ class NestingPanel(QtGui.QWidget):
         
         self.minkowski_settings_group.setLayout(minkowski_form_layout)
 
+        # --- Physics Packer Settings ---
+        self.physics_settings_group = QtGui.QGroupBox("Physics Nesting Settings")
+        physics_form_layout = QtGui.QFormLayout()
+
+        # Direction Dial for Physics
+        self.physics_direction_dial = QtGui.QDial()
+        self.physics_direction_dial.setRange(0, _MINKOWSKI_DIR_MAX)
+        self.physics_direction_dial.setValue(0) 
+        self.physics_direction_dial.setWrapping(True)
+        self.physics_direction_dial.setNotchesVisible(True)
+        self.physics_direction_label = QtGui.QLabel("Down")
+        self.physics_direction_label.setAlignment(QtCore.Qt.AlignCenter)
+
+        def update_physics_dial_label(value):
+            direction_map = {0: "Down", 90: "Left", 180: "Up", 270: "Right"}
+            direction_text = direction_map.get(value, "")
+            self.physics_direction_label.setText(direction_text if direction_text else f"{value}°")
+        self.physics_direction_dial.valueChanged.connect(update_physics_dial_label)
+
+        physics_dial_layout = QtGui.QVBoxLayout()
+        physics_dial_layout.addWidget(self.physics_direction_dial)
+        physics_dial_layout.addWidget(self.physics_direction_label)
+
+        self.physics_random_checkbox = QtGui.QCheckBox("Use Random Direction")
+        self.physics_random_checkbox.stateChanged.connect(lambda state: self.physics_direction_dial.setDisabled(state))
+
+        self.physics_step_size_input = QtGui.QDoubleSpinBox(); self.physics_step_size_input.setRange(0.1, 100); self.physics_step_size_input.setValue(5.0)
+        self.physics_max_spawn_input = QtGui.QSpinBox(); self.physics_max_spawn_input.setRange(1, 1000); self.physics_max_spawn_input.setValue(100)
+        self.physics_max_nesting_steps_input = QtGui.QSpinBox(); self.physics_max_nesting_steps_input.setRange(1, 5000); self.physics_max_nesting_steps_input.setValue(500)
+        
+        # Annealing controls
+        self.physics_anneal_steps_input = QtGui.QSpinBox(); self.physics_anneal_steps_input.setRange(0, 500); self.physics_anneal_steps_input.setValue(100)
+        self.anneal_rotate_checkbox = QtGui.QCheckBox("Anneal Rotate"); self.anneal_rotate_checkbox.setChecked(True)
+        self.anneal_translate_checkbox = QtGui.QCheckBox("Anneal Translate"); self.anneal_translate_checkbox.setChecked(True)
+        self.anneal_random_shake_checkbox = QtGui.QCheckBox("Random Shake Direction")
+
+        physics_form_layout.addRow("Gravity Direction:", physics_dial_layout)
+        physics_form_layout.addRow(self.physics_random_checkbox)
+        physics_form_layout.addRow("Step Size:", self.physics_step_size_input)
+        physics_form_layout.addRow("Max Spawn Attempts:", self.physics_max_spawn_input)
+        physics_form_layout.addRow("Max Nesting Steps:", self.physics_max_nesting_steps_input)
+        physics_form_layout.addRow(QtGui.QLabel("")) # Spacer
+        physics_form_layout.addRow(QtGui.QLabel("--- Annealing (Shake) ---"))
+        physics_form_layout.addRow("Anneal Steps:", self.physics_anneal_steps_input)
+        physics_form_layout.addRow(self.anneal_rotate_checkbox)
+        physics_form_layout.addRow(self.anneal_translate_checkbox)
+        physics_form_layout.addRow(self.anneal_random_shake_checkbox)
+
+        self.physics_settings_group.setLayout(physics_form_layout)
+
+        # Set initial visibility
+        self.minkowski_settings_group.setVisible(False)
+        self.physics_settings_group.setVisible(True)
+
 
 
 
@@ -245,6 +307,7 @@ class NestingPanel(QtGui.QWidget):
 
 
         form_layout.addRow(self.minkowski_settings_group)
+        form_layout.addRow(self.physics_settings_group)
 
         form_layout.addRow("Identifier Font:", font_layout)
         form_layout.addRow(label_options_layout)
@@ -500,6 +563,11 @@ class NestingPanel(QtGui.QWidget):
         angle = self.rotation_angles[value]
         steps = int(360 / angle)
         self.rotation_display_label.setText(f"{angle}° ({steps} steps)")
+
+    def _on_algorithm_change(self, algo_name):
+        """Handles switching between nesting algorithms."""
+        self.minkowski_settings_group.setVisible(algo_name == "Minkowski")
+        self.physics_settings_group.setVisible(algo_name == "Physics")
 
     def reset_progress(self):
         """Resets and hides the progress bar."""

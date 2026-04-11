@@ -6,52 +6,44 @@
 | Component   | `nestingworkbench/Tools/Nesting/` |
 | Depends on  | None                 |
 
-**Context** — Re-implementing the previously removed "Gravity Nester" as the "Physics Nester" and making it the default algorithm for the nesting workbench.
+**Context** — Re-implementing the previously removed "Gravity Nester" as the "Physics Nester" and evaluating it alongside the unified Minkowski/Genetic nester.
 
 #### T-001: Create physics_nester.py
 - [ ] **T-001** `nestingworkbench/Tools/Nesting/algorithms/physics_nester.py` (NEW FILE)
-  Create the new algorithm file. Copy the implementation from `.agents/skills/nw_physics_nester/SKILL.md`.
+  Create the new algorithm file. Copy the implementation from `.agents/skills/nw_physics_nester/SKILL.md`. Ensure it inherits from the appropriate base nester.
 
-#### T-002: Update nesting_logic.py mappings
-- [ ] **T-002** `nestingworkbench/Tools/Nesting/nesting_logic.py` lines 6-10 and 35-43
-  Import `PhysicsNester` and register it.
+#### T-002: Update nesting_logic.py
+- [ ] **T-002** `nestingworkbench/Tools/Nesting/nesting_logic.py`
+  Modify `nest(parts, width, height, ...)` to accept an `algorithm` parameter (or accept it via kwargs).
   ```python
-  from .algorithms import (
-      genetic_nester,
-      physics_nester,
-      minkowski_nester)
-  ```
-  ```python
-      nester_class = {
-          'Genetic': genetic_nester.GeneticNester,
-          'Minkowski': minkowski_nester.MinkowskiNester,
-          'Physics': physics_nester.PhysicsNester,
-      }.get(algorithm)
+  from .algorithms import physics_nester
+  from .algorithms import nesting_strategy
 
-      if nester_class is None:
-          raise NotImplementedError(f"The algorithm '{algorithm}' is not supported.")
-
-      SHAPELY_ALGORITHMS = ['Genetic', 'Minkowski', 'Physics']
+  def nest(parts, width, height, rotation_steps=1, simulate=False, algorithm='Minkowski', **kwargs):
+      # ... (existing setup code)
+      
+      if algorithm == 'Physics':
+          nester = physics_nester.PhysicsNester(width, height, rotation_steps, **kwargs)
+      else:
+          # Default to the existing Minkowski/Genetic strategy
+          nester = nesting_strategy.Nester(width, height, rotation_steps, **kwargs)
   ```
 
 #### T-003: Update ui_nesting.py for Algorithm Selection
-- [ ] **T-003** `nestingworkbench/Tools/Nesting/ui_nesting.py` lines 56-57 and around line 105
-  Add "Physics" to the algorithm dropdown, make it the default, and add its settings UI group.
-  ```python
-          self.algorithm_dropdown = QtGui.QComboBox()
-          self.algorithm_dropdown.addItems(["Genetic", "Minkowski", "Physics"])
-          self.algorithm_dropdown.setCurrentIndex(2)
-  ```
-  Add the UI widgets block for `self.physics_settings_group` as defined in `.agents/skills/nw_physics_nester/SKILL.md`. Add this around line 105 where the old `gravity_settings_group` was removed.
-  Make sure to also map the visibility toggle around line 197 in `on_algorithm_change`: `self.physics_settings_group.setVisible(algo_name == "Physics")` and add it to `form_layout.addRow(self.physics_settings_group)` around line 148.
+- [ ] **T-003** `nestingworkbench/Tools/Nesting/ui_nesting.py`
+  Add a dropdown to select between the default Minkowski layout and the new Physics nester, and default it to Physics. Add a group for the Physics settings, utilizing the variables from the `SKILL.md` reference.
+  Create `self.physics_settings_group` alongside `self.minkowski_settings_group`.
+  Add `self.algorithm_dropdown = QtGui.QComboBox()` with `["Minkowski", "Physics"]` and `setCurrentIndex(1)`.
+  Connect visibility of the groups (`minkowski_settings_group`, `physics_settings_group`) to changes in this new dropdown.
 
 #### T-004: Map Settings in nesting_controller.py
-- [ ] **T-004** `nestingworkbench/Tools/Nesting/nesting_controller.py` lines 884-900 (`_prepare_algo_kwargs`)
-  Extract UI values for the Physics nester if selected.
+- [ ] **T-004** `nestingworkbench/Tools/Nesting/nesting_controller.py` inside `_prepare_algo_kwargs` and `get_ui_params`
+  In `get_ui_params(self)`, extract the `algorithm` chosen from `self.ui.algorithm_dropdown.currentText()`.
+  In `_prepare_algo_kwargs(self, ui_params)`, branch the logic based on the algorithm:
   ```python
       def _prepare_algo_kwargs(self, ui_params):
           algo_kwargs = {}
-          algorithm = ui_params['algorithm']
+          algorithm = ui_params.get('algorithm', 'Minkowski')
           
           if algorithm == 'Physics':
               if self.ui.physics_random_checkbox.isChecked():
@@ -67,10 +59,16 @@
               algo_kwargs['max_spawn_count'] = self.ui.physics_max_spawn_input.value()
               algo_kwargs['anneal_steps'] = self.ui.physics_anneal_steps_input.value()
               algo_kwargs['max_nesting_steps'] = self.ui.physics_max_nesting_steps_input.value()
+          else:
+              # Keep all existing Minkowski kwargs mappings intact
+              pass
+              
+          return algo_kwargs
   ```
+  Ensure that `algorithm` is properly passed down from the controller's `run()` to `nesting_logic.nest()`.
 
 **Acceptance criteria**
 
-1. The "Physics Nester Settings" group is visible in the UI when the "Physics" algorithm is selected.
+1. The "Physics Nester Settings" group is dynamically swapped with the "Minkowski Nesting Settings" group when toggling the dropdown.
 2. The "Physics" algorithm is selected by default upon opening the Nesting Panel.
-3. Nesting with the "Physics" algorithm successfully places parts on the sheet using the simulated physics direction.
+3. Nesting with the "Physics" algorithm successfully uses logic from `physics_nester.py` and passes the unique physics parameters.

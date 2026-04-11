@@ -5,6 +5,7 @@ import Part
 import copy
 
 from .algorithms import nesting_strategy
+from .algorithms import physics_nester
 from .visualization_manager import VisualizationManager
 
 class NestingDependencyError(Exception):
@@ -92,7 +93,7 @@ def _cleanup_highlighting():
     viz_manager.clear_highlight()
 
 # --- Public Function ---
-def nest(parts, width, height, rotation_steps=1, simulate=False, **kwargs):
+def nest(parts, width, height, rotation_steps=1, simulate=False, algorithm='Minkowski', **kwargs):
     """
     Convenience function to run the nesting algorithm.
     
@@ -135,7 +136,11 @@ def nest(parts, width, height, rotation_steps=1, simulate=False, **kwargs):
         kwargs['part_end_callback'] = _on_part_end
 
     # The controller now passes a fresh list of all parts to be nested.
-    nester = nesting_strategy.Nester(width, height, rotation_steps, **kwargs)
+    if algorithm == 'Physics':
+        nester = physics_nester.PhysicsNester(width, height, rotation_steps, **kwargs)
+    else:
+        # Default to the existing Minkowski/Genetic strategy
+        nester = nesting_strategy.Nester(width, height, rotation_steps, **kwargs)
 
     # If simulation is enabled, pass a callback that can draw the sheet state.
     if simulate:
