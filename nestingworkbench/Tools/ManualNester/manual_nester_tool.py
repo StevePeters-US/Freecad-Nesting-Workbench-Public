@@ -531,10 +531,17 @@ class ManualNesterToolObserver:
         if not drag_info: return
         dragged_center, d_w, d_h = drag_info
 
+        # Only simulate parts on the sheet the dragged part is currently over.
+        # Use _drag_active_sheet during a drag (tracks cursor position across sheets),
+        # falling back to the registered sheet if the cursor hasn't moved over a sheet yet.
+        dragged_sheet = self._drag_active_sheet or self.obj_to_sheet.get(self.selected_obj)
+
         # Collect other parts and their centers/dims
         parts_info = []
         for obj in self.original_placements:
             if obj == self.selected_obj:
+                continue
+            if dragged_sheet and self.obj_to_sheet.get(obj) != dragged_sheet:
                 continue
             info = self._get_obj_phys_info(obj)
             if info:
@@ -558,8 +565,12 @@ class ManualNesterToolObserver:
                 obj.Placement = pl
                 displaced_objs.append(obj)
 
-        # Iteratively resolve all collisions in the layout to create chain reaction (Relaxation)
-        all_tracked = [o for o in self.original_placements if o != self.selected_obj]
+        # Iteratively resolve collisions on the same sheet (chain reaction / Relaxation)
+        all_tracked = [
+            o for o in self.original_placements
+            if o != self.selected_obj
+            and (not dragged_sheet or self.obj_to_sheet.get(o) == dragged_sheet)
+        ]
 
         for _ in range(3):
             any_moved = False
