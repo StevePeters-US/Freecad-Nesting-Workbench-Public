@@ -4,6 +4,7 @@ import copy
 import random
 from shapely.geometry import Polygon
 from shapely.affinity import translate, rotate
+from shapely.ops import unary_union
 from PySide import QtGui
 import FreeCAD
 from ....datatypes.sheet import Sheet
@@ -19,7 +20,7 @@ class BaseNester(object):
         self._bin_height = height
         self.rotation_steps = max(1, rotation_steps)
         self.max_spawn_count = kwargs.get("max_spawn_count", 100)
-        self.anneal_steps = kwargs.get("anneal_steps", 100)
+        self.anneal_steps = kwargs.get("anneal_steps", 25)
         self.step_size = kwargs.get("step_size", 5.0)
         self.anneal_rotate_enabled = kwargs.get("anneal_rotate_enabled", True)
         self.anneal_translate_enabled = kwargs.get("anneal_translate_enabled", True)
@@ -29,8 +30,10 @@ class BaseNester(object):
         self.sheets = []
         self.update_callback = None
         self.progress_callback = None
+        self.cancel_callback = kwargs.get("cancel_callback", None)
         
         self._bin_polygon = Polygon([(0, 0), (width, 0), (width, height), (0, height)])
+        self._bin_boundary = self._bin_polygon.exterior
 
     def log(self, message):
         FreeCAD.Console.PrintMessage(f"NESTING: {message}\n")
@@ -49,6 +52,10 @@ class BaseNester(object):
         total_count = len(self.parts_to_place)
 
         for i, part in enumerate(self.parts_to_place):
+            if self.cancel_callback and self.cancel_callback():
+                self.log("Cancelled by user.")
+                break
+
             if self.progress_callback:
                 self.progress_callback(i + 1, total_count, f"Placing {part.id}...")
 
@@ -94,9 +101,50 @@ class BaseNester(object):
         """Must be implemented by subclasses."""
         raise NotImplementedError
 
+    def _calculate_contact_score(self, shape, sheet):
+        """
+        Calculates a score based on how much the shape's boundary 
+        touches other shapes or the sheet border.
+        Higher score = better (tighter fit).
+        """
+        if not shape.polygon or shape.polygon.is_empty:
+            return 0.0
+            
+        # Small buffer to detect "almost touching"
+        eps = 0.5 
+        buffered = shape.polygon.buffer(eps)
+        
+        score = 0.0
+        
+        # 1. Contact with sheet borders
+        try:
+            border_overlap = buffered.intersection(self._bin_boundary)
+            if not border_overlap.is_empty:
+                # Intersection with exterior line is a (Multi)LineString
+                score += border_overlap.length
+        except Exception:
+            pass
+            
+        # 2. Contact with other parts
+        neighbors = [p.shape.polygon for p in sheet.parts if p.shape and p.shape.polygon]
+        if neighbors:
+            try:
+                # union neighbors for faster intersection check
+                neighbors_union = unary_union(neighbors)
+                neighbor_overlap = buffered.intersection(neighbors_union)
+                if not neighbor_overlap.is_empty:
+                    # Intersection of buffered poly with neighbor poly is a strip poly
+                    # Its length (perimeter) is proportional to contact length
+                    score += neighbor_overlap.length
+            except Exception:
+                pass
+                
+        return score
+
     def _anneal_part(self, part, sheet, direction, rotate_enabled=True, translate_enabled=True):
         """
-        Local search to find a valid spot when stuck.
+        Narrowing random walk to find a better valid spot.
+        Start with large random jumps and progressively narrow to fine adjustments.
         """
         if self.anneal_steps == 0 or (not rotate_enabled and not translate_enabled):
             return
@@ -107,32 +155,54 @@ class BaseNester(object):
         base_perp_dir = (-direction[1], direction[0])
         initial_side = random.choice([1, -1])
 
+        # Track the best configuration found so far DURING this annealing call
+        best_score = self._calculate_contact_score(part, sheet)
+        best_state = (initial_x, initial_y, initial_angle)
+
         for i in range(self.anneal_steps):
-            amplitude = self.step_size * (i // 2 + 1)
-            side = initial_side if i % 2 == 0 else -initial_side
+            if self.cancel_callback and self.cancel_callback():
+                break
 
-            # Reset
-            part.move_to(initial_x, initial_y)
-            part.set_rotation(initial_angle)
+            progress = i / self.anneal_steps
+            
+            # Reset to current best before taking a new random jump
+            part.move_to(best_state[0], best_state[1])
+            part.set_rotation(best_state[2])
 
+            # 1. Rotation (Narrowing Random Walk)
             if rotate_enabled and part.rotation_steps > 1:
-                step_deg = (360.0 / part.rotation_steps) * (i // 2 + 1)
-                new_angle = (initial_angle + step_deg * side) % 360.0
+                # Decrease max jump radius from 50% circle to ~1 step
+                max_jump = max(1, int((part.rotation_steps // 2) * (1.0 - progress)))
+                offset = random.randint(-max_jump, max_jump)
+                
+                current_step = round(best_state[2] / (360.0 / part.rotation_steps))
+                new_step = (current_step + offset) % part.rotation_steps
+                new_angle = new_step * (360.0 / part.rotation_steps)
                 part.set_rotation(new_angle)
 
+            # 2. Translation (Similarly narrows its shake radius)
             if translate_enabled:
+                amplitude = self.step_size * (1.0 - progress) * 2.0  # Optional: Scale by progress
+                # Re-calculate side logic or use randomness
                 if self.anneal_random_shake_direction:
                     rand_angle = random.uniform(0, 2 * math.pi)
                     move_dir = (math.cos(rand_angle), math.sin(rand_angle))
                 else:
+                    side = initial_side if i % 2 == 0 else -initial_side
                     move_dir = (base_perp_dir[0] * side, base_perp_dir[1] * side)
                 
                 part.move(move_dir[0] * amplitude, move_dir[1] * amplitude)
 
+            # Check if this new test configuration is valid
             if sheet.is_placement_valid(part, part_to_ignore=part):
-                return
+                score = self._calculate_contact_score(part, sheet)
+                # If it's the best score we've seen, update our current 'best' state
+                if score > best_score:
+                    best_score = score
+                    bx, by, _, _ = part.bounding_box()
+                    best_state = (bx, by, part.angle)
         
-        # Revert if no luck
-        part.move_to(initial_x, initial_y)
-        part.set_rotation(initial_angle)
+        # Apply the absolute best state found during the walk
+        part.move_to(best_state[0], best_state[1])
+        part.set_rotation(best_state[2])
 

@@ -80,6 +80,7 @@ class GACoordinator:
         mutation_rate = 0.1
         early_stop_threshold = 5
         verbose = algo_kwargs.get('verbose', False)
+        cancel_callback = algo_kwargs.get('cancel_callback', lambda: False)
         
         if verbose:
             FreeCAD.Console.PrintMessage(f"GA Mode: {generations} generations, {population_size} population\n")
@@ -102,6 +103,10 @@ class GACoordinator:
         
         try:
             for gen in range(generations):
+                if cancel_callback():
+                    FreeCAD.Console.PrintMessage("Nesting cancelled by user.\n")
+                    break
+
                 if verbose:
                     FreeCAD.Console.PrintMessage(f"\n=== Generation {gen+1}/{generations} ===\n")
                 self._set_status(f"Generation {gen+1}/{generations}...")
@@ -116,6 +121,10 @@ class GACoordinator:
                 
                 # Run nesting on each layout
                 for idx, layout in enumerate(layouts):
+                    if cancel_callback():
+                        FreeCAD.Console.PrintMessage("Nesting cancelled by user.\n")
+                        break
+
                     if verbose:
                         FreeCAD.Console.PrintMessage(f"  [Gen {gen+1}] Layout {idx+1}/{len(layouts)}: {layout.name}\n")
                     

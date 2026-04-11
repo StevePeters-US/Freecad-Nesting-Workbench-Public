@@ -265,6 +265,8 @@ class NestingController:
         self.doc = FreeCAD.ActiveDocument
         self.current_job = None
         self.shape_preparer = ShapePreparer(self.doc, {})
+        self.is_running = False
+        self.cancel_requested = False
         
         # Initialize default fonts
         font_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'fonts'))
@@ -300,6 +302,7 @@ class NestingController:
         is_simulating = self.ui.simulate_nesting_checkbox.isChecked()
         verbose = self.ui.verbose_logging_checkbox.isChecked()
         algo_kwargs['verbose'] = verbose
+        algo_kwargs['cancel_callback'] = self._check_cancel
         
         # Persist verbose setting
         prefs = FreeCAD.ParamGet(PREFS_PATH)
@@ -318,9 +321,17 @@ class NestingController:
         algo_kwargs['progress_callback'] = progress_cb
         
         try:
+            self.is_running = True
+            self.cancel_requested = False
+            self.ui.nest_button.setEnabled(False)
+            self.ui.cancel_button.setEnabled(True)
             self._execute_ga_nesting(target_layout, ui_params, quantities, master_map, 
                                      rotation_params, algo_kwargs, is_simulating)
         finally:
+            self.is_running = False
+            self.cancel_requested = False
+            self.ui.nest_button.setEnabled(True)
+            self.ui.cancel_button.setEnabled(False)
             # Ensure progress bar is reset on finish/error
             self.ui.reset_progress()
     
@@ -671,6 +682,22 @@ class NestingController:
             self.current_job = None
             FreeCAD.Console.PrintMessage("Job Finalized & Committed.\n")
             self.doc.recompute()
+
+    def request_cancel(self):
+        """Called when the custom Cancel Nesting button is clicked."""
+        if self.is_running:
+            self.cancel_requested = True
+            try:
+                self.ui.status_label.setText("Cancelling... Please wait.")
+            except Exception:
+                pass
+        else:
+            self.cancel_job()
+            if hasattr(self.ui, 'reject'):
+                self.ui.reject()
+
+    def _check_cancel(self):
+        return self.cancel_requested
 
     def cancel_job(self):
         """Called when User clicks Cancel."""

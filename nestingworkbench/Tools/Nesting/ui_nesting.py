@@ -227,7 +227,7 @@ class NestingPanel(QtGui.QWidget):
         self.physics_max_nesting_steps_input = QtGui.QSpinBox(); self.physics_max_nesting_steps_input.setRange(1, 5000); self.physics_max_nesting_steps_input.setValue(500)
         
         # Annealing controls
-        self.physics_anneal_steps_input = QtGui.QSpinBox(); self.physics_anneal_steps_input.setRange(0, 500); self.physics_anneal_steps_input.setValue(100)
+        self.physics_anneal_steps_input = QtGui.QSpinBox(); self.physics_anneal_steps_input.setRange(0, 500); self.physics_anneal_steps_input.setValue(25)
         self.anneal_rotate_checkbox = QtGui.QCheckBox("Anneal Rotate"); self.anneal_rotate_checkbox.setChecked(True)
         self.anneal_translate_checkbox = QtGui.QCheckBox("Anneal Translate"); self.anneal_translate_checkbox.setChecked(True)
         self.anneal_random_shake_checkbox = QtGui.QCheckBox("Random Shake Direction")
@@ -266,6 +266,8 @@ class NestingPanel(QtGui.QWidget):
         self.sound_checkbox = QtGui.QCheckBox("Play sound on completion"); self.sound_checkbox.setChecked(True)
         
         self.nest_button = QtGui.QPushButton("Run Nesting")
+        self.cancel_button = QtGui.QPushButton("Cancel Nesting")
+        self.cancel_button.setEnabled(False)
 
         # --- Add/Remove buttons for the shape table ---
         self.add_parts_button = QtGui.QPushButton("Add Selected")
@@ -326,6 +328,7 @@ class NestingPanel(QtGui.QWidget):
         table_button_layout.addWidget(self.remove_parts_button)
 
         action_button_layout.addWidget(self.nest_button)
+        action_button_layout.addWidget(self.cancel_button)
 
         main_layout.addLayout(form_layout)
         main_layout.addWidget(self.shape_table)
@@ -361,6 +364,7 @@ class NestingPanel(QtGui.QWidget):
         from .nesting_controller import NestingController
         self.controller = NestingController(self)
         self.nest_button.clicked.connect(self.controller.execute_nesting)
+        self.cancel_button.clicked.connect(self.controller.request_cancel)
         self.font_select_button.clicked.connect(self.select_font_file)
         self.show_bounds_checkbox.stateChanged.connect(self.controller.toggle_bounds_visibility)
         self.add_parts_button.clicked.connect(self.controller.add_selected_shapes)

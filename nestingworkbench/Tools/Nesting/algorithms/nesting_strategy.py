@@ -240,6 +240,7 @@ class Nester:
         self.part_start_callback = kwargs.get("part_start_callback")  # Called when starting to place a part
         self.part_end_callback = kwargs.get("part_end_callback")  # Called after part is placed
         self.progress_callback = kwargs.get("progress_callback") # Called with (current, total)
+        self.cancel_callback = kwargs.get("cancel_callback") # Called to check if nesting should abort
         
         step_size = kwargs.get("step_size", 5.0) 
         use_gpu = kwargs.get("use_gpu", False)
@@ -300,6 +301,10 @@ class Nester:
         total_parts = len(current_parts)
         
         for i, part in enumerate(current_parts):
+            if self.cancel_callback and self.cancel_callback():
+                self.log("Nesting cancelled by user.")
+                break
+
             if self.verbose and not quiet:
                 self.log(f"Processing part {i+1}/{total_parts}: {part.id}")
             

@@ -54,6 +54,9 @@ class PhysicsNester(BaseNester):
     def _apply_physics_to_part(self, part, sheet, direction):
         """Moves a part in a direction until it hits an obstacle."""
         for _ in range(self.max_nesting_steps):
+            if self.cancel_callback and self.cancel_callback():
+                break
+
             dx = direction[0] * self.step_size
             dy = direction[1] * self.step_size
 
@@ -73,6 +76,9 @@ class PhysicsNester(BaseNester):
         """Orchestrates physics movement and annealing ('shaking') to find a dense spot."""
         cycle = 0
         while cycle < self.max_nesting_steps:
+            if self.cancel_callback and self.cancel_callback():
+                break
+
             cycle += 1
 
             pre_physics_x, pre_physics_y, _, _ = part.bounding_box()
