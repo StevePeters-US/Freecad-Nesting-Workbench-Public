@@ -16,6 +16,21 @@ from PySide import QtCore
 import math
 import time
 
+# Coin3D event dicts do NOT reliably carry modifier-key state.
+# Query Qt directly instead — same pattern as the button-state poll.
+try:
+    from PySide2.QtWidgets import QApplication as _QApp
+    from PySide2.QtCore import Qt as _Qt
+except ImportError:
+    from PySide.QtGui import QApplication as _QApp
+    from PySide.QtCore import Qt as _Qt
+
+
+def _qt_modifiers():
+    """Return (shift, ctrl) booleans from Qt's live modifier state."""
+    mods = _QApp.queryKeyboardModifiers()
+    return bool(mods & _Qt.ShiftModifier), bool(mods & _Qt.ControlModifier)
+
 
 class InputManager:
     """
@@ -137,14 +152,8 @@ class InputManager:
             self._button_poll_timer.stop()
             return
         try:
-            try:
-                from PySide2.QtWidgets import QApplication
-                from PySide2.QtCore import Qt
-            except ImportError:
-                from PySide.QtGui import QApplication
-                from PySide.QtCore import Qt
-            buttons = QApplication.mouseButtons()
-            if not (buttons & Qt.LeftButton):
+            buttons = _QApp.mouseButtons()
+            if not (buttons & _Qt.LeftButton):
                 FreeCAD.Console.PrintMessage("[InputManager] Button release detected via poll.\n")
                 self._button_poll_timer.stop()
                 self.is_mouse_down = False
@@ -240,8 +249,10 @@ class InputManager:
                 self.drag_start_screen_pos = pos
                 self._button_poll_timer.start(30)  # Watch for missed UP events
 
-                # Initial mode from Shift key
-                if event_dict.get("Shift", False):
+                # Initial mode from Shift key — read from Qt, not Coin3D event dict
+                # (Coin3D event dicts don't reliably carry modifier state)
+                shift, _ctrl = _qt_modifiers()
+                if shift:
                     self.set_mode("ROTATE")
                 else:
                     self.set_mode("TRANSLATE")
@@ -268,7 +279,7 @@ class InputManager:
 
         # ---- Scroll wheel ------------------------------------------------
         elif btn in ("BUTTON4", "BUTTON5", 4, 5):
-            ctrl = event_dict.get("Ctrl", False) or event_dict.get("Control", False)
+            _shift, ctrl = _qt_modifiers()
             if state == "DOWN" and ctrl:
                 delta = 25.0 if btn in ("BUTTON4", 4) else -25.0
                 self._emit("scroll_radius", delta)
@@ -284,8 +295,8 @@ class InputManager:
     def _handle_mouse_move(self, event_dict):
         pos = event_dict["Position"]
         self.last_known_screen_pos = pos
-        snap = event_dict.get("Ctrl", False) or event_dict.get("Control", False)
-        shift = event_dict.get("Shift", False)
+        # Read modifiers from Qt — Coin3D event dict omits them during drag
+        shift, snap = _qt_modifiers()
 
         # Only process when there is an active interaction
         if not self.is_mouse_down and not self.is_free_grab:

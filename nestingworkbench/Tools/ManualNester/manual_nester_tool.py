@@ -313,24 +313,31 @@ class ManualNesterToolObserver:
                 self._hide_radius_indicator()
 
         elif self.input.mode == "ROTATE":
-            if not self.start_placement: return
+            if not self.start_placement or not self.start_pos: return
 
-            # Calculate rotation based on horizontal mouse movement from drag start
-            current_x = pos[0]
-            start_x = self.input.drag_start_screen_pos[0]
-            delta_x = current_x - start_x
+            part_origin = self.start_placement.Base
+            current_pos_3d = self.view.getPoint(pos[0], pos[1])
 
-            sensitivity = 0.5 # Degrees per pixel
-            angle_deg = delta_x * sensitivity
+            # Vectors from part origin to the initial click and current mouse (XY plane)
+            sv_x = self.start_pos.x - part_origin.x
+            sv_y = self.start_pos.y - part_origin.y
+            cv_x = current_pos_3d.x - part_origin.x
+            cv_y = current_pos_3d.y - part_origin.y
 
-            # Snap logic (CTRL key)
+            # Skip if click was too close to origin to define an angle
+            if math.sqrt(sv_x*sv_x + sv_y*sv_y) < 1.0 or math.sqrt(cv_x*cv_x + cv_y*cv_y) < 1.0:
+                return
+
+            angle_rad = math.atan2(sv_x * cv_y - sv_y * cv_x,
+                                   sv_x * cv_x + sv_y * cv_y)
+            angle_deg = math.degrees(angle_rad)
+
+            # Snap to 45° increments with Ctrl
             if snap:
                 step = 45.0
                 angle_deg = round(angle_deg / step) * step
 
-            # Rotate around Z axis (2D nesting)
-            rot = FreeCAD.Rotation(FreeCAD.Vector(0,0,1), angle_deg)
-
+            rot = FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), angle_deg)
             new_placement = self.start_placement.copy()
             new_placement.Rotation = rot.multiply(self.start_placement.Rotation)
             self.selected_obj.Placement = new_placement
