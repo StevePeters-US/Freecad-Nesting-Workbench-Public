@@ -25,6 +25,7 @@ class BaseNester(object):
         self.anneal_rotate_enabled = kwargs.get("anneal_rotate_enabled", True)
         self.anneal_translate_enabled = kwargs.get("anneal_translate_enabled", True)
         self.anneal_random_shake_direction = kwargs.get("anneal_random_shake_direction", False)
+        self.verbose = kwargs.get("verbose", False)
 
         self.parts_to_place = []
         self.sheets = []
@@ -101,53 +102,35 @@ class BaseNester(object):
         """Must be implemented by subclasses."""
         raise NotImplementedError
 
-    def _calculate_contact_score(self, shape, sheet):
+    def _evaluate_placement(self, shape, direction):
         """
-        Calculates a score based on how much the shape's boundary 
-        touches other shapes or the sheet border.
-        Higher score = better (tighter fit).
+        Evaluates a placement based on the centroid's position in gravity direction.
+        Higher score = further along the direction vector.
+        Uses the shape's centroid (part origin) as requested.
+        Includes a small tie-breaker to favor the sheet origin (packing to the side).
         """
-        if not shape.polygon or shape.polygon.is_empty:
-            return 0.0
+        center = shape.centroid
+        if not center:
+            return -float('inf')
             
-        # Small buffer to detect "almost touching"
-        eps = 0.5 
-        buffered = shape.polygon.buffer(eps)
+        # 1. Primary score: distance along gravity direction
+        primary_score = center.x * direction[0] + center.y * direction[1]
         
-        score = 0.0
+        # 2. Tie-breaker: small penalty for distance from origin
+        # (center.x + center.y) effectively pushes to the bottom-left corner
+        # if gravity is downward.
+        tie_breaker = -(abs(center.x) + abs(center.y)) * 0.001
         
-        # 1. Contact with sheet borders
-        try:
-            border_overlap = buffered.intersection(self._bin_boundary)
-            if not border_overlap.is_empty:
-                # Intersection with exterior line is a (Multi)LineString
-                score += border_overlap.length
-        except Exception:
-            pass
-            
-        # 2. Contact with other parts
-        neighbors = [p.shape.polygon for p in sheet.parts if p.shape and p.shape.polygon]
-        if neighbors:
-            try:
-                # union neighbors for faster intersection check
-                neighbors_union = unary_union(neighbors)
-                neighbor_overlap = buffered.intersection(neighbors_union)
-                if not neighbor_overlap.is_empty:
-                    # Intersection of buffered poly with neighbor poly is a strip poly
-                    # Its length (perimeter) is proportional to contact length
-                    score += neighbor_overlap.length
-            except Exception:
-                pass
-                
-        return score
+        return primary_score + tie_breaker
 
     def _anneal_part(self, part, sheet, direction, rotate_enabled=True, translate_enabled=True):
         """
-        Narrowing random walk to find a better valid spot.
-        Start with large random jumps and progressively narrow to fine adjustments.
+        Opportunistic random walk.
+        Shakes the part until a strictly better valid spot is found, then returns immediately.
+        Returns True if a better spot was found, False otherwise.
         """
         if self.anneal_steps == 0 or (not rotate_enabled and not translate_enabled):
-            return
+            return False
 
         initial_x, initial_y, _, _ = part.bounding_box()
         initial_angle = part.angle
@@ -155,35 +138,30 @@ class BaseNester(object):
         base_perp_dir = (-direction[1], direction[0])
         initial_side = random.choice([1, -1])
 
-        # Track the best configuration found so far DURING this annealing call
-        best_score = self._calculate_contact_score(part, sheet)
+        # the baseline to beat
+        starting_score = self._evaluate_placement(part, direction)
+        best_score = starting_score
         best_state = (initial_x, initial_y, initial_angle)
+
+        current_state = best_state
+
+        # LOGGING
+        self.log(f"--- Annealing Cycle Start for {part.id} ---")
+        self.log(f"  Pos Jumps: {self.anneal_steps}, Rotations per jump: {part.rotation_steps}")
 
         for i in range(self.anneal_steps):
             if self.cancel_callback and self.cancel_callback():
+                self.log("Annealing cancelled.")
                 break
 
             progress = i / self.anneal_steps
             
-            # Reset to current best before taking a new random jump
-            part.move_to(best_state[0], best_state[1])
-            part.set_rotation(best_state[2])
+            # --- 1. SHAKE (Pick a new candidate position) ---
+            part.move_to(current_state[0], current_state[1])
+            part.set_rotation(current_state[2])
 
-            # 1. Rotation (Narrowing Random Walk)
-            if rotate_enabled and part.rotation_steps > 1:
-                # Decrease max jump radius from 50% circle to ~1 step
-                max_jump = max(1, int((part.rotation_steps // 2) * (1.0 - progress)))
-                offset = random.randint(-max_jump, max_jump)
-                
-                current_step = round(best_state[2] / (360.0 / part.rotation_steps))
-                new_step = (current_step + offset) % part.rotation_steps
-                new_angle = new_step * (360.0 / part.rotation_steps)
-                part.set_rotation(new_angle)
-
-            # 2. Translation (Similarly narrows its shake radius)
             if translate_enabled:
-                amplitude = self.step_size * (1.0 - progress) * 2.0  # Optional: Scale by progress
-                # Re-calculate side logic or use randomness
+                amplitude = self.step_size * (1.0 - progress) * 1.5 
                 if self.anneal_random_shake_direction:
                     rand_angle = random.uniform(0, 2 * math.pi)
                     move_dir = (math.cos(rand_angle), math.sin(rand_angle))
@@ -193,16 +171,60 @@ class BaseNester(object):
                 
                 part.move(move_dir[0] * amplitude, move_dir[1] * amplitude)
 
-            # Check if this new test configuration is valid
-            if sheet.is_placement_valid(part, part_to_ignore=part):
-                score = self._calculate_contact_score(part, sheet)
-                # If it's the best score we've seen, update our current 'best' state
-                if score > best_score:
-                    best_score = score
-                    bx, by, _, _ = part.bounding_box()
-                    best_state = (bx, by, part.angle)
+            cand_x, cand_y, _, _ = part.bounding_box()
+
+            # --- 2. ROTATION SEARCH (Try all n angles at the new position) ---
+            pos_best_score = -float('inf')
+            pos_best_angle = None
+            
+            rot_steps_to_try = part.rotation_steps if (rotate_enabled and part.rotation_steps > 1) else 1
+            
+            for r in range(rot_steps_to_try):
+                angle = r * (360.0 / part.rotation_steps) if rot_steps_to_try > 1 else part.angle
+                part.set_rotation(angle)
+                
+                if sheet.is_placement_valid(part, part_to_ignore=part):
+                    score = self._evaluate_placement(part, direction)
+                    if score > pos_best_score:
+                        pos_best_score = score
+                        pos_best_angle = part.angle
+                        
+                    # OPPORTUNISTIC EARLY EXIT: 
+                    # If this orientation at this position is already better than where we started,
+                    # take it and return to the main physics loop immediately!
+                    if score > starting_score:
+                        self.log(f"  Advantage found at PosStep {i:2d}, Rot {r:2d}: Score {score:8.3f} > {starting_score:8.3f}. EXITING EARLY.")
+                        best_state = (cand_x, cand_y, part.angle)
+                        part.move_to(best_state[0], best_state[1])
+                        part.set_rotation(best_state[2])
+                        return True
+
+            # --- 3. EVALUATE JUMP (Internal walk progress) ---
+            if pos_best_angle is not None:
+                current_state = (cand_x, cand_y, pos_best_angle)
+                part.set_rotation(pos_best_angle) 
+                
+                if pos_best_score > best_score:
+                    best_score = pos_best_score
+                    best_state = current_state
+                
+                self.log(f"  PosStep {i:2d}: Pos=({cand_x:6.1f}, {cand_y:6.1f}), BestAngle={pos_best_angle:5.1f}, Score={pos_best_score:8.3f} (Wiggle)")
+            else:
+                part.move_to(current_state[0], current_state[1])
+                part.set_rotation(current_state[2])
+                if self.verbose:
+                    self.log(f"  PosStep {i:2d}: Invalid")
         
-        # Apply the absolute best state found during the walk
-        part.move_to(best_state[0], best_state[1])
-        part.set_rotation(best_state[2])
+        # If we reached here, we finished all steps without an "advantage" jump.
+        # Check if we at least found a marginally better spot than the start.
+        if best_score > starting_score:
+            self.log(f"Annealing finished with improvement. Best Score: {best_score:8.3f}")
+            part.move_to(best_state[0], best_state[1])
+            part.set_rotation(best_state[2])
+            return True
+        else:
+            self.log(f"Annealing finished (no improvement). Baseline: {starting_score:8.3f}")
+            part.move_to(initial_x, initial_y)
+            part.set_rotation(initial_angle)
+            return False
 

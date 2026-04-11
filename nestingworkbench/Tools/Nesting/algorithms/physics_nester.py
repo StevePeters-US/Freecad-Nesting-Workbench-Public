@@ -89,18 +89,17 @@ class PhysicsNester(BaseNester):
             physics_moved = abs(post_physics_x - pre_physics_x) > 1e-6 or abs(post_physics_y - pre_physics_y) > 1e-6
 
             if physics_moved:
+                cycle = 0 # Reset iteration count because we made progress
                 continue
 
             # If physics alone can't move the part, try to shake it free (annealing)
-            pre_anneal_x, pre_anneal_y, _, _ = part.bounding_box()
-            self._anneal_part(part, sheet, direction, 
+            # This now returns True if a breakthrough (better spot) was found.
+            shake_moved = self._anneal_part(part, sheet, direction, 
                              rotate_enabled=self.anneal_rotate_enabled, 
                              translate_enabled=self.anneal_translate_enabled)
-            post_anneal_x, post_anneal_y, _, _ = part.bounding_box()
             
-            shake_moved = abs(post_anneal_x - pre_anneal_x) > 1e-6 or abs(post_anneal_y - pre_anneal_y) > 1e-6
-
             if shake_moved:
+                cycle = 0 # Reset iteration count because the wiggle found a better opening
                 continue
 
             # No movement possible after both physics and annealing

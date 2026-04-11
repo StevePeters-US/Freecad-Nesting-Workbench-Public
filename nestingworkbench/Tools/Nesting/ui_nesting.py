@@ -562,16 +562,36 @@ class NestingPanel(QtGui.QWidget):
         except Exception as e:
             FreeCAD.Console.PrintWarning(f"UI Update Error: {e}\n")
 
-    def _update_rotation_label(self, value):
-        """Updates the rotation label when slider changes."""
-        angle = self.rotation_angles[value]
-        steps = int(360 / angle)
-        self.rotation_display_label.setText(f"{angle}° ({steps} steps)")
+    def _update_rotation_label(self, value=None):
+        if value is None:
+            value = self.rotation_steps_slider.value()
+            
+        algo = self.algorithm_dropdown.currentText()
+        
+        # Determine mapping based on algorithm
+        if algo == "Physics":
+            # Physics mapping: explicit steps requested by user
+            angles = [360, 90, 45, 30, 15, 10, 5, 2, 1]
+        else:
+            # Minkowski mapping: high resolution
+            angles = self.rotation_angles
+            
+        if value < len(angles):
+            angle = angles[value]
+            steps = int(360 / angle) if angle > 0 else 1
+            
+            # Formatting: Minkowski preserves 'Angle' naming, Physics adds 'Steps' clarification
+            if algo == "Physics":
+                self.rotation_display_label.setText(f"{angle}° ({steps} steps)")
+            else:
+                self.rotation_display_label.setText(f"{angle}°")
 
     def _on_algorithm_change(self, algo_name):
         """Handles switching between nesting algorithms."""
         self.minkowski_settings_group.setVisible(algo_name == "Minkowski")
         self.physics_settings_group.setVisible(algo_name == "Physics")
+        # Ensure the rotation label/steps are immediately clarified for the new algorithm
+        self._update_rotation_label()
 
     def reset_progress(self):
         """Resets and hides the progress bar."""

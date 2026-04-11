@@ -302,6 +302,14 @@ class NestingController:
         is_simulating = self.ui.simulate_nesting_checkbox.isChecked()
         verbose = self.ui.verbose_logging_checkbox.isChecked()
         algo_kwargs['verbose'] = verbose
+        
+        # VERIFICATION LOGS for the user
+        rot_steps = ui_params.get('rotation_steps', 1)
+        ann_steps = algo_kwargs.get('anneal_steps', 25) if ui_params.get('algorithm') == 'Physics' else 0
+        FreeCAD.Console.PrintMessage(f"Algorithm Selected: {ui_params.get('algorithm', 'Unknown')}\n")
+        FreeCAD.Console.PrintMessage(f"  -> UI Rotation Steps Slider: {rot_steps}\n")
+        FreeCAD.Console.PrintMessage(f"  -> UI Anneal Steps Input: {ann_steps}\n")
+        
         algo_kwargs['cancel_callback'] = self._check_cancel
         
         # Persist verbose setting
@@ -540,7 +548,6 @@ class NestingController:
         
         self.ui.shape_table.setRowCount(len(self.ui.selected_shapes_to_process))
         for i, obj in enumerate(self.ui.selected_shapes_to_process):
-            # Clean up label if it's a master shape
             display_label = obj.Label
             if display_label.startswith("master_shape_"):
                 display_label = display_label.replace("master_shape_", "")
@@ -639,9 +646,25 @@ class NestingController:
         if self.ui.shape_table.rowCount() == 0:
             self.ui.nest_button.setEnabled(False)
 
-    
+    def _get_rotation_steps(self):
+        """Returns the orientation count based on algorithm-specific angle mapping."""
+        algo = self.ui.algorithm_dropdown.currentText()
+        idx = self.ui.rotation_steps_slider.value()
+        
+        if algo == "Physics":
+            # Mapping: 0->360(1), 1->90(4), 2->45(8), 3->30(12), 4->15(24), 5->10(36), 6->5(72), 7->2(180), 8->1(360)
+            angles = [360, 90, 45, 30, 15, 10, 5, 2, 1]
+            if idx < len(angles):
+                angle = angles[idx]
+                return int(360 / angle)
+        
+        # Default Minkowski/Common mapping
+        angles = self.ui.rotation_angles
+        if idx < len(angles):
+            angle = angles[idx]
+            return int(360 / angle)
+        return 1
 
-    
     def _execute_ga_nesting(self, target_layout, ui_params, quantities, master_map, 
                             rotation_params, algo_kwargs, is_simulating):
         """GA optimization using multiple layouts."""
@@ -811,9 +834,6 @@ class NestingController:
         return target
 
     def _collect_ui_params(self):
-        # Convert deflection angle (degrees) to linear deflection (mm)
-        # Formula: deflection_mm = angle / 200.0
-        # This gives: 10° → 0.05mm, 20° → 0.1mm, 40° → 0.2mm
         deflection_angle = self.ui.deflection_input.value()
         deflection_mm = deflection_angle / 200.0
         
@@ -825,8 +845,8 @@ class NestingController:
             'deflection': deflection_mm,  # Linear deflection for processing
             'deflection_angle': deflection_angle,  # Angle for persistence
             'simplification': self.ui.simplification_input.value(),
-            # Convert slider index to rotation steps
-            'rotation_steps': int(360 / self.ui.rotation_angles[self.ui.rotation_steps_slider.value()]),
+            # Rotation steps calculation
+            'rotation_steps': self._get_rotation_steps(),
             'add_labels': self.ui.add_labels_checkbox.isChecked(),
             'font_path': getattr(self.ui, 'selected_font_path', None),
             'show_bounds': self.ui.show_bounds_checkbox.isChecked(),
@@ -1013,5 +1033,4 @@ class NestingController:
             self.ui.status_label.setText("Error")
             if hasattr(self.ui, 'install_taichi_button'):
                 self.ui.install_taichi_button.setEnabled(True)
-
 
