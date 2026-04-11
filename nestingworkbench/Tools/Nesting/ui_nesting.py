@@ -433,7 +433,7 @@ class NestingPanel(QtGui.QWidget):
         # Process UI events to make sure the label updates immediately
         # We wrap this too, just in case
         try:
-            QtGui.QApplication.processEvents()
+            FreeCADGui.updateGui()
         except RuntimeError:
             pass
 
@@ -486,7 +486,7 @@ class NestingPanel(QtGui.QWidget):
                     self.progressBar.setFormat("%p%")
                 
                 # Force UI update
-                QtGui.QApplication.processEvents()
+                FreeCADGui.updateGui()
             else:
                 self.progressBar.setValue(0)
                 self.progressBar.setVisible(False)

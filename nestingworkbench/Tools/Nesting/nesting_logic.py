@@ -1,5 +1,6 @@
 from PySide import QtGui
 import FreeCAD
+import FreeCADGui
 import Part
 import copy
 
@@ -138,7 +139,7 @@ def nest(parts, width, height, rotation_steps=1, simulate=False, **kwargs):
 
     # If simulation is enabled, pass a callback that can draw the sheet state.
     if simulate:
-        nester.update_callback = lambda part, sheet: (sheet.draw(FreeCAD.ActiveDocument, {}, transient_part=part), QtGui.QApplication.processEvents())
+        nester.update_callback = lambda part, sheet: (sheet.draw(FreeCAD.ActiveDocument, {}, transient_part=part), FreeCADGui.updateGui())
 
     import time
     start_time = time.monotonic()

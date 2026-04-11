@@ -3,6 +3,7 @@ Coordinates the Genetic Algorithm nesting loop.
 Extracted from NestingController._execute_ga_nesting() to follow SRP.
 """
 import FreeCAD
+import FreeCADGui
 import math
 import random
 from PySide import QtGui
@@ -31,22 +32,34 @@ class GACoordinator:
     def _set_status(self, msg):
         callback = self.ui_callbacks.get('set_status')
         if callback:
-            callback(msg)
+            try:
+                callback(msg)
+            except RuntimeError:
+                pass
 
     def _update_progress(self, current, total, msg=None):
         callback = self.ui_callbacks.get('update_progress')
         if callback:
-            callback(current, total, msg)
+            try:
+                callback(current, total, msg)
+            except RuntimeError:
+                pass
 
     def _reset_progress(self):
         callback = self.ui_callbacks.get('reset_progress')
         if callback:
-            callback()
+            try:
+                callback()
+            except RuntimeError:
+                pass
 
     def _play_sound(self):
         callback = self.ui_callbacks.get('play_sound')
         if callback:
-            callback()
+            try:
+                callback()
+            except RuntimeError:
+                pass
 
     def run(self, target_layout, ui_params, quantities, master_map,
             rotation_params, algo_kwargs, is_simulating):
@@ -76,7 +89,7 @@ class GACoordinator:
         
         # STEP 1: Create initial population of layouts
         self._set_status(f"Creating {population_size} layouts...")
-        QtGui.QApplication.processEvents()
+        FreeCADGui.updateGui()
         
         layouts = layout_manager.create_ga_population(
             master_map, quantities, ui_params, population_size, rotation_steps, verbose=verbose
@@ -92,7 +105,7 @@ class GACoordinator:
                 if verbose:
                     FreeCAD.Console.PrintMessage(f"\n=== Generation {gen+1}/{generations} ===\n")
                 self._set_status(f"Generation {gen+1}/{generations}...")
-                QtGui.QApplication.processEvents()
+                FreeCADGui.updateGui()
                 
                 # Debug: show all layouts with their part counts
                 if verbose:
@@ -176,7 +189,7 @@ class GACoordinator:
                     if population_size > 1 and layout.layout_group and hasattr(layout.layout_group, "ViewObject"):
                         layout.layout_group.ViewObject.Visibility = False
                     
-                    QtGui.QApplication.processEvents()
+                    FreeCADGui.updateGui()
                 
                 # Sort by fitness (lower is better)
                 layouts.sort(key=lambda l: l.fitness)

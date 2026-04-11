@@ -922,7 +922,7 @@ class NestingController:
             self.ui.status_label.setText("Installing Dependencies...")
             if hasattr(self.ui, 'install_taichi_button'):
                 self.ui.install_taichi_button.setEnabled(False)
-            QtGui.QApplication.processEvents()
+            FreeCADGui.updateGui()
             
             # sys.executable in FreeCAD often points to FreeCAD.exe.
             # We need the python.exe in the same directory (bin).

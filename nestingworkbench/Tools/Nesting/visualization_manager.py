@@ -1,4 +1,5 @@
 import FreeCAD
+import FreeCADGui
 import Part
 from PySide import QtGui
 
@@ -40,7 +41,7 @@ class VisualizationManager:
                 self._trial_viz_obj.Shape = wire
             
             # Force UI update to show the change immediately during simulation
-            QtGui.QApplication.processEvents()
+            FreeCADGui.updateGui()
         except Exception as e:
             FreeCAD.Console.PrintWarning(f"[VisualizationManager] Draw failed: {e}\n")
 
@@ -85,7 +86,7 @@ class VisualizationManager:
             if obj:
                 self._set_highlight(obj, True)
                 self._highlighted_master = obj
-                QtGui.QApplication.processEvents()
+                FreeCADGui.updateGui()
 
     def clear_highlight(self):
         """Removes the highlight from the currently highlighted master container."""
