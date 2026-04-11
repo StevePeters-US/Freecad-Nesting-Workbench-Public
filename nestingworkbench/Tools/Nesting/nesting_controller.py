@@ -246,7 +246,7 @@ class NestingJob:
         
         # Save Nesting Direction as a vector/tuple if possible, or just the dial value
         # For simplicity and transparency in the UI, we'll save the dial value (degrees)
-        dial_val = self.ui.minkowski_direction_dial.value()
+        dial_val = p.get('nesting_direction', 0)
         self._set_prop(layout_obj, PROP_INTEGER, PROP_NESTING_DIRECTION, dial_val)
 
     def _set_prop(self, obj, type_str, name, val):
@@ -808,7 +808,8 @@ class NestingController:
             'generations': self.ui.minkowski_generations_input.value(),
             'population_size': self.ui.minkowski_population_size_input.value(),
             'use_gpu': self.ui.use_gpu_checkbox.isChecked(),
-            'verbose': self.ui.verbose_logging_checkbox.isChecked()
+            'verbose': self.ui.verbose_logging_checkbox.isChecked(),
+            'nesting_direction': self.ui.minkowski_direction_dial.value()
         }
         
         # Save persistence

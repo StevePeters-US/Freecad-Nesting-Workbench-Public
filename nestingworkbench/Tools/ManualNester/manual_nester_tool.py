@@ -226,23 +226,6 @@ class ManualNesterToolObserver:
     def handle_click(self, pos):
         """On mouse down: Select object and start interaction."""
 
-        # M-B07: If in free-grab mode, this click DROPS the part
-        if self.input.is_free_grab and self.selected_obj:
-            FreeCAD.Console.PrintMessage(f"Manual Nester: Attempting to place {self.selected_obj.Label}...\n")
-            target_sheet = self._find_sheet_at_pos(self.selected_obj.Placement.Base)
-            if target_sheet:
-                shapes_group = next((c for c in target_sheet.Group if c.Label.startswith("Shapes_")), None)
-                if shapes_group:
-                    QtCore.QTimer.singleShot(0, lambda g=shapes_group.Name, o=self.selected_obj.Name: self._deferred_add_object_to_group(g, o))
-                FreeCAD.Console.PrintMessage(f"Manual Nester: Deferred placement of {self.selected_obj.Label}.\n")
-            else:
-                if self.selected_obj in self.new_objects:
-                    QtCore.QTimer.singleShot(0, lambda o=self.selected_obj.Name: self._deferred_revert_single_object(o))
-                    FreeCAD.Console.PrintMessage("Dropped outside sheet: clone implicitly scheduled for removal.\n")
-            self.input.set_free_grab(False)
-            self.finish_operation()
-            return
-
         clicked_obj = self.pick_object(pos)
         FreeCAD.Console.PrintMessage(f"Manual Nester: Picked {clicked_obj.Label if clicked_obj else 'None'}\n")
 
@@ -268,7 +251,7 @@ class ManualNesterToolObserver:
                 self.start_placement = self.selected_obj.Placement.copy()
                 self.input.set_mode("TRANSLATE")
                 self.input.set_free_grab(True)
-                FreeCAD.Console.PrintMessage(f"Manual Nester: Created clone {clicked_obj.Label}. Click to place.\n")
+                FreeCAD.Console.PrintMessage(f"Manual Nester: Created clone {clicked_obj.Label}. Release to place.\n")
             return
 
         if clicked_obj:
@@ -357,23 +340,15 @@ class ManualNesterToolObserver:
 
     def handle_release(self):
         """On mouse up: place the part or finish the interaction."""
-        # In free-grab mode, mouse release does NOT place the part.
-        # The next left-click will handle placement via handle_click.
-        if self.input.is_free_grab:
-            self.input.is_mouse_down = False
-            return
-
         # Clicked on a part without dragging — no-op (just deselect).
-        # Hold-to-drag is the only interaction for existing parts.
-        # Free-grab is reserved for master clones (set in handle_click).
-        if not self.input.is_implicit_drag and self.selected_obj:
+        if not self.input.is_implicit_drag and not self.input.is_free_grab and self.selected_obj:
             # Defer finish to avoid modifying Coin3D scene graph inside callback
             QtCore.QTimer.singleShot(0, self.finish_operation)
             self.input.is_mouse_down = False
             return
 
-        # Hold-and-drag release: place the part
-        if self.input.is_implicit_drag:
+        # Hold-and-drag release or free-grab release: place the part
+        if self.input.is_implicit_drag or self.input.is_free_grab:
             if self.selected_obj:
                 FreeCAD.Console.PrintMessage(f"Manual Nester: Ending drag, attempting to place {self.selected_obj.Label}...\n")
                 target_sheet_group = self._find_sheet_at_pos(self.selected_obj.Placement.Base)
@@ -404,6 +379,7 @@ class ManualNesterToolObserver:
 
         # Defer finish_operation to avoid modifying Coin3D scene graph
         # (radius indicator removal) inside its own event callback.
+        self.input.set_free_grab(False)
         QtCore.QTimer.singleShot(0, self.finish_operation)
         self.input.is_mouse_down = False
         self.input.is_implicit_drag = False
