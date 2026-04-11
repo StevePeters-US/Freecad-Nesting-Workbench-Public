@@ -53,6 +53,11 @@ class InputManager:
         self.drag_start_screen_pos = (0, 0)
         self.last_known_screen_pos = (0, 0)
 
+        # Poll timer: FreeCAD's viewport navigation can swallow the mouse-UP
+        # Coin3D event. We poll Qt's actual button state to catch missed UPs.
+        self._button_poll_timer = QtCore.QTimer()
+        self._button_poll_timer.timeout.connect(self._poll_button_state)
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -72,6 +77,7 @@ class InputManager:
 
     def deactivate(self):
         """Remove all Coin3D event callbacks."""
+        self._button_poll_timer.stop()
         for evt, cb_id in self._callback_ids:
             try:
                 self.view.removeEventCallback(evt, cb_id)
@@ -109,6 +115,7 @@ class InputManager:
 
     def finish(self):
         """Reset to IDLE after a successfully completed operation."""
+        self._button_poll_timer.stop()
         self.mode = "IDLE"
         self.constraint = None
         self.constraint_lock_pos = None
@@ -123,6 +130,28 @@ class InputManager:
     # ------------------------------------------------------------------
     # Internal — Coin3D callback wiring
     # ------------------------------------------------------------------
+
+    def _poll_button_state(self):
+        """Detect missed mouse-UP events by polling Qt's actual button state."""
+        if not self.is_mouse_down:
+            self._button_poll_timer.stop()
+            return
+        try:
+            try:
+                from PySide2.QtWidgets import QApplication
+                from PySide2.QtCore import Qt
+            except ImportError:
+                from PySide.QtGui import QApplication
+                from PySide.QtCore import Qt
+            buttons = QApplication.mouseButtons()
+            if not (buttons & Qt.LeftButton):
+                FreeCAD.Console.PrintMessage("[InputManager] Button release detected via poll.\n")
+                self._button_poll_timer.stop()
+                self.is_mouse_down = False
+                self._emit("release")
+        except Exception as e:
+            FreeCAD.Console.PrintWarning(f"[InputManager] Poll error: {e}\n")
+            self._button_poll_timer.stop()
 
     def _make_callback(self, event_type):
         """Return a closure that tags the raw dict with *event_type*."""
@@ -209,6 +238,7 @@ class InputManager:
 
                 self.is_mouse_down = True
                 self.drag_start_screen_pos = pos
+                self._button_poll_timer.start(30)  # Watch for missed UP events
 
                 # Initial mode from Shift key
                 if event_dict.get("Shift", False):
@@ -222,6 +252,7 @@ class InputManager:
             else:  # UP
                 if self.is_mouse_down:
                     FreeCAD.Console.PrintMessage("Manual Nester: Mouse UP received.\n")
+                    self._button_poll_timer.stop()
                     self.is_mouse_down = False
                     self._emit("release")
                 return True

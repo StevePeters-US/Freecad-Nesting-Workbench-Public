@@ -246,11 +246,12 @@ class ManualNesterToolObserver:
             new_obj = self._clone_part_from_master(clicked_obj)
             if new_obj:
                 clicked_obj = new_obj
-                # Enter free-grab mode: clone follows cursor, next click drops it
+                # Treat as an active drag immediately: clone follows cursor,
+                # release drops it (same path as hold-to-drag for existing parts).
                 self.selected_obj = clicked_obj
                 self.start_placement = self.selected_obj.Placement.copy()
                 self.input.set_mode("TRANSLATE")
-                self.input.set_free_grab(True)
+                self.input.is_implicit_drag = True
                 FreeCAD.Console.PrintMessage(f"Manual Nester: Created clone {clicked_obj.Label}. Release to place.\n")
             return
 
@@ -340,15 +341,22 @@ class ManualNesterToolObserver:
 
     def handle_release(self):
         """On mouse up: place the part or finish the interaction."""
+        # In free-grab mode, mouse release does NOT place the part.
+        # The next left-click will handle placement via handle_click.
+        if self.input.is_free_grab:
+            self.input.is_mouse_down = False
+            return
+
         # Clicked on a part without dragging — no-op (just deselect).
-        if not self.input.is_implicit_drag and not self.input.is_free_grab and self.selected_obj:
+        # Hold-to-drag is the only interaction for existing parts.
+        if not self.input.is_implicit_drag and self.selected_obj:
             # Defer finish to avoid modifying Coin3D scene graph inside callback
             QtCore.QTimer.singleShot(0, self.finish_operation)
             self.input.is_mouse_down = False
             return
 
-        # Hold-and-drag release or free-grab release: place the part
-        if self.input.is_implicit_drag or self.input.is_free_grab:
+        # Hold-and-drag release: place the part
+        if self.input.is_implicit_drag:
             if self.selected_obj:
                 FreeCAD.Console.PrintMessage(f"Manual Nester: Ending drag, attempting to place {self.selected_obj.Label}...\n")
                 target_sheet_group = self._find_sheet_at_pos(self.selected_obj.Placement.Base)
@@ -379,7 +387,6 @@ class ManualNesterToolObserver:
 
         # Defer finish_operation to avoid modifying Coin3D scene graph
         # (radius indicator removal) inside its own event callback.
-        self.input.set_free_grab(False)
         QtCore.QTimer.singleShot(0, self.finish_operation)
         self.input.is_mouse_down = False
         self.input.is_implicit_drag = False
