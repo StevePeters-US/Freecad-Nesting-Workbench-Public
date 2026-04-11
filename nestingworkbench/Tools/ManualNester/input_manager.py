@@ -154,7 +154,6 @@ class InputManager:
         try:
             buttons = _QApp.mouseButtons()
             if not (buttons & _Qt.LeftButton):
-                FreeCAD.Console.PrintMessage("[InputManager] Button release detected via poll.\n")
                 self._button_poll_timer.stop()
                 self.is_mouse_down = False
                 self._emit("release")

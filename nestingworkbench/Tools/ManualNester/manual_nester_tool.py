@@ -553,6 +553,17 @@ class ManualNesterToolObserver:
             dragged_center, d_w, d_h, drag_delta, parts_info
         )
 
+        # Pre-build sheet boundary cache for the active sheet to avoid repeated lookups
+        def _get_sheet_boundary(sheet_group):
+            if not sheet_group:
+                return None
+            boundary = next((c for c in sheet_group.Group if c.Label.startswith("Sheet_Boundary_")), None)
+            if boundary and hasattr(boundary, "Shape") and hasattr(boundary.Shape, "BoundBox"):
+                return boundary.Shape.BoundBox
+            return None
+
+        dragged_sheet_bbox = _get_sheet_boundary(dragged_sheet)
+
         displaced_objs = []
         for obj, displacement in displacements:
             if displacement.Length > 0.01:  # Skip negligible moves
@@ -563,9 +574,14 @@ class ManualNesterToolObserver:
                 pl = obj.Placement
                 pl.Base = pl.Base + displacement
                 obj.Placement = pl
+                # Clamp immediately so displaced parts can't leave the sheet
+                if dragged_sheet_bbox:
+                    self.collision_resolver.clamp_to_sheet(obj, dragged_sheet_bbox)
                 displaced_objs.append(obj)
 
-        # Iteratively resolve collisions on the same sheet (chain reaction / Relaxation)
+        # Resolve overlaps between each part and the dragged part only.
+        # No chain reactions between neighbors — on a packed sheet those cascade
+        # into jumbled layouts and parts pushed off the boundary.
         all_tracked = [
             o for o in self.original_placements
             if o != self.selected_obj
@@ -573,28 +589,31 @@ class ManualNesterToolObserver:
         ]
 
         for _ in range(3):
-            any_moved = False
+            any_separated = False
 
-            # A. Resolve overlaps between dragged part and others (dragged part stays, others move)
+            # Separate each part from the dragged part (dragged stays, others move)
             for obj in all_tracked:
+                b = obj.Placement.Base
+                pos_before = (b.x, b.y, b.z)
                 self.collision_resolver.separate_overlapping(obj, [self.selected_obj])
+                b = obj.Placement.Base
+                if (b.x, b.y, b.z) != pos_before:
+                    if dragged_sheet_bbox:
+                        self.collision_resolver.clamp_to_sheet(obj, dragged_sheet_bbox)
+                    any_separated = True
 
+            # Resolve overlaps between neighbors, clamping both parts immediately
+            # so chain reactions can't push parts off the sheet boundary
             for i, obj in enumerate(all_tracked):
-                # B. Clamp to its persistent sheet (GLOBAL COORDS)
-                sheet_group = self.obj_to_sheet.get(obj)
-                if sheet_group:
-                    boundary = next((c for c in sheet_group.Group if c.Label.startswith("Sheet_Boundary_")), None)
-                    if boundary and hasattr(boundary, "Shape") and hasattr(boundary.Shape, "BoundBox"):
-                        # Shape.BoundBox already includes placement (world coords)
-                        if self.collision_resolver.clamp_to_sheet(obj, boundary.Shape.BoundBox):
-                             any_moved = True
-
-                # C. Separate from neighbors (Symmetric push)
                 for other in all_tracked[i+1:]:
                     if self.collision_resolver.resolve_bi_collision(obj, other):
-                        any_moved = True
+                        if dragged_sheet_bbox:
+                            self.collision_resolver.clamp_to_sheet(obj, dragged_sheet_bbox)
+                            self.collision_resolver.clamp_to_sheet(other, dragged_sheet_bbox)
+                        any_separated = True
 
-            if not any_moved: break
+            if not any_separated:
+                break
 
     def _get_shape_bbox(self, obj, parent_placement=None):
         """Returns the global BoundBox for an object, prioritizing BoundaryObject.
