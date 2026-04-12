@@ -67,6 +67,8 @@ class InputManager:
         self.last_down_time = 0.0
         self.drag_start_screen_pos = (0, 0)
         self.last_known_screen_pos = (0, 0)
+        self._ctrl_adjusting_radius = False  # True while Ctrl is held during TRANSLATE
+        self._ctrl_prev_pos = None           # Previous screen pos for Ctrl-radius delta
 
         # Poll timer: FreeCAD's viewport navigation can swallow the mouse-UP
         # Coin3D event. We poll Qt's actual button state to catch missed UPs.
@@ -137,6 +139,8 @@ class InputManager:
         self.is_implicit_drag = False
         self.is_free_grab = False
         self.is_mouse_down = False
+        self._ctrl_adjusting_radius = False
+        self._ctrl_prev_pos = None
 
     def reset(self):
         """Hard-reset all input state (used on cancel)."""
@@ -295,14 +299,33 @@ class InputManager:
         pos = event_dict["Position"]
         self.last_known_screen_pos = pos
         # Read modifiers from Qt — Coin3D event dict omits them during drag
-        shift, snap = _qt_modifiers()
+        shift, ctrl = _qt_modifiers()
 
         # Only process when there is an active interaction
         if not self.is_mouse_down and not self.is_free_grab:
             return False
 
-        # Dynamic mode switch during an active drag
         active_drag = self.is_implicit_drag or self.is_free_grab
+
+        # Ctrl during TRANSLATE: horizontal mouse movement adjusts the influence radius.
+        # Part stays put; drag is rebaselined when Ctrl is released.
+        if active_drag and self.mode == "TRANSLATE":
+            if ctrl:
+                if not self._ctrl_adjusting_radius:
+                    self._ctrl_adjusting_radius = True
+                    self._ctrl_prev_pos = pos
+                dx = pos[0] - (self._ctrl_prev_pos[0] if self._ctrl_prev_pos else pos[0])
+                self._ctrl_prev_pos = pos
+                if dx != 0:
+                    self._emit("scroll_radius", dx * 3.0)  # 3 mm per pixel
+                return True  # consume — don't move the part
+            elif self._ctrl_adjusting_radius:
+                # Ctrl released — exit radius-adjust and rebaseline the drag
+                self._ctrl_adjusting_radius = False
+                self._ctrl_prev_pos = None
+                self._emit("mode_switched", pos)
+
+        # Dynamic mode switch during an active drag (Shift → ROTATE)
         target_mode = "ROTATE" if shift else "TRANSLATE"
         if self.mode != target_mode and active_drag:
             FreeCAD.Console.PrintMessage(
@@ -325,7 +348,7 @@ class InputManager:
         if not self.is_implicit_drag and not self.is_free_grab:
             return False
 
-        self._emit("move", pos, snap, shift)
+        self._emit("move", pos, ctrl, shift)
 
         if self.mode != "IDLE" or self.is_free_grab:
             return True

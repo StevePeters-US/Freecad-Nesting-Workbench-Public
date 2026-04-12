@@ -421,7 +421,7 @@ class ManualNesterToolObserver:
 
     def _on_scroll_radius(self, delta):
         """Ctrl+scroll adjusts the physics influence radius."""
-        new_radius = max(25.0, min(2000.0, self.physics_engine.radius + delta))
+        new_radius = max(0.0, min(2000.0, self.physics_engine.radius + delta))
         self.physics_engine.radius = new_radius
 
         # Sync to UI
@@ -580,7 +580,7 @@ class ManualNesterToolObserver:
 
         drag_info = self._get_obj_phys_info(self.selected_obj)
         if not drag_info: return
-        dragged_center, d_w, d_h = drag_info
+        dragged_center, _, _ = drag_info
 
         # Only simulate parts on the sheet the dragged part is currently over.
         # Use _drag_active_sheet during a drag (tracks cursor position across sheets),
@@ -599,9 +599,8 @@ class ManualNesterToolObserver:
                 c, w, h = info
                 parts_info.append((obj, c, w, h))
 
-        # Compute and apply displacements (using gap distance)
         displacements = self.physics_engine.compute_displacements(
-            dragged_center, d_w, d_h, drag_delta, parts_info
+            dragged_center, drag_delta, parts_info
         )
 
         # Pre-build sheet boundary cache for the active sheet to avoid repeated lookups
@@ -630,26 +629,29 @@ class ManualNesterToolObserver:
                     self.collision_resolver.clamp_to_sheet(obj, dragged_sheet_bbox)
                 displaced_objs.append(obj)
 
-        # Resolve overlaps only within the set of displaced parts (inside influence radius).
-        # Parts outside the radius are never moved by chain reactions.
         if not displaced_objs:
             return
+
+        displaced_set = set(id(o) for o in displaced_objs)
+        # Static parts: tracked, not dragged, not displaced — these must never be pushed through
+        static_parts = [o for o in self.original_placements
+                        if o != self.selected_obj and id(o) not in displaced_set]
 
         for _ in range(3):
             any_separated = False
 
-            # Separate each radius-affected part from the dragged part
+            # Separate each displaced part from the dragged part and all static parts
             for obj in displaced_objs:
                 b = obj.Placement.Base
                 pos_before = (b.x, b.y, b.z)
-                self.collision_resolver.separate_overlapping(obj, [self.selected_obj])
+                self.collision_resolver.separate_overlapping(obj, [self.selected_obj] + static_parts)
                 b = obj.Placement.Base
                 if (b.x, b.y, b.z) != pos_before:
                     if dragged_sheet_bbox:
                         self.collision_resolver.clamp_to_sheet(obj, dragged_sheet_bbox)
                     any_separated = True
 
-            # Resolve overlaps between displaced neighbors only
+            # Resolve overlaps between displaced neighbors
             for i, obj in enumerate(displaced_objs):
                 for other in displaced_objs[i+1:]:
                     if self.collision_resolver.resolve_bi_collision(obj, other):

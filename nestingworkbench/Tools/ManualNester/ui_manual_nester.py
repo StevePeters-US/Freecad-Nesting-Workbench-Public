@@ -39,7 +39,7 @@ class ManualNesterToolUI(QtGui.QWidget):
         radius_layout = QtGui.QHBoxLayout()
         radius_layout.addWidget(QtGui.QLabel("Influence Radius (mm):"))
         self.radius_spin = QtGui.QDoubleSpinBox()
-        self.radius_spin.setRange(50, 1000)
+        self.radius_spin.setRange(0, 1000)
         self.radius_spin.setValue(200)
         self.radius_spin.setSingleStep(10)
         radius_layout.addWidget(self.radius_spin)

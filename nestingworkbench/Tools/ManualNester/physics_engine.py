@@ -18,21 +18,21 @@ class PhysicsEngine:
 
     def compute_falloff(self, distance):
         """Returns falloff factor in [0, 1]. 0 = no influence, 1 = full influence."""
+        if self.radius <= 0:
+            return 0.0
         if distance >= self.radius:
             return 0.0
         if distance <= 0:
             return 1.0
         return max(0.0, 1.0 - (distance / self.radius) ** self.curve_exponent)
 
-    def compute_displacements(self, dragged_center, dragged_width, dragged_height, drag_delta, parts_info):
+    def compute_displacements(self, dragged_center, drag_delta, parts_info):
         """
-        Compute displacement vectors for all parts based on gap distance to dragged part.
+        Compute displacement vectors for all parts based on center-to-center distance.
         Parts are pushed AWAY from the dragged part center (repulsion).
 
         Args:
             dragged_center: FreeCAD.Vector — current center of the dragged part
-            dragged_width: float — width of dragged part (X)
-            dragged_height: float — height of dragged part (Y)
             drag_delta: FreeCAD.Vector — how much the dragged part moved this frame
             parts_info: list of (obj, center, width, height) — other parts
 
@@ -51,14 +51,9 @@ class PhysicsEngine:
                 displacements.append((obj, type(drag_delta)(0, 0, 0)))
                 continue
 
-            # Edge-to-edge (gap) distance calculation
-            # Subtract half-extents of both parts from the center-to-center components
-            gap_x = max(0.0, abs(dx) - (dragged_width + width) / 2.0)
-            gap_y = max(0.0, abs(dy) - (dragged_height + height) / 2.0)
-            edge_distance = (gap_x**2 + gap_y**2)**0.5
-
-            # Force falloff based on the gap distance
-            factor = self.compute_falloff(edge_distance) * self.strength
+            # Force falloff based on center-to-center distance, which matches the
+            # visual indicator circle shown in the viewport.
+            factor = self.compute_falloff(center_distance) * self.strength
             
             if factor < 0.001:
                 displacements.append((obj, type(drag_delta)(0, 0, 0)))
