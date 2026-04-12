@@ -873,7 +873,14 @@ class NestingController:
             'verbose': self.ui.verbose_logging_checkbox.isChecked(),
             'nesting_direction': self.ui.minkowski_direction_dial.value(),
             'algorithm': self.ui.algorithm_dropdown.currentText(),
-            'stability_tolerance': self.ui.physics_stability_tolerance_input.value()
+            'stability_tolerance': self.ui.physics_improvement_threshold_input.value(),
+            'anneal_curve': self.ui.physics_anneal_curve_type.currentText(),
+            'anneal_min_amp': self.ui.physics_anneal_min_amp.value(),
+            'anneal_max_amp': self.ui.physics_anneal_max_amp.value(),
+            'anneal_rot_steps': self.ui.physics_anneal_rot_steps.value(),
+            'anneal_rot_curve': self.ui.physics_anneal_rot_curve_type.currentText(),
+            'anneal_rot_min': self.ui.physics_anneal_rot_min.value(),
+            'anneal_rot_max': self.ui.physics_anneal_rot_max.value()
         }
         
         # Save persistence
@@ -904,7 +911,15 @@ class NestingController:
         prefs.SetFloat(PROP_LABEL_HEIGHT, float(settings['label_height']))
         prefs.SetFloat(PROP_LABEL_SIZE, float(settings['label_size']))
         prefs.SetBool(PROP_USE_GPU, bool(settings.get('use_gpu', False)))
-        prefs.SetFloat("PhysicsStabilityTolerance", float(settings.get('stability_tolerance', 0.0001)))
+        prefs.SetFloat("PhysicsStabilityTolerance", float(settings.get('stability_tolerance', 0.01)))
+        prefs.SetString("PhysicsAnnealCurveType", str(settings.get('anneal_curve', "Logarithmic")))
+        prefs.SetFloat("PhysicsAnnealMinAmp", float(settings.get('anneal_min_amp', 0.1)))
+        prefs.SetFloat("PhysicsAnnealMaxAmp", float(settings.get('anneal_max_amp', 100.0)))
+        
+        prefs.SetInt("PhysicsAnnealRotSteps", int(settings.get('anneal_rot_steps', 10)))
+        prefs.SetString("PhysicsAnnealRotCurveType", str(settings.get('anneal_rot_curve', "Logarithmic")))
+        prefs.SetFloat("PhysicsAnnealRotMin", float(settings.get('anneal_rot_min', 1.0)))
+        prefs.SetFloat("PhysicsAnnealRotMax", float(settings.get('anneal_rot_max', 90.0)))
         if settings['font_path']:
              prefs.SetString("FontPath", str(settings['font_path']))
 
@@ -975,7 +990,14 @@ class NestingController:
             algo_kwargs['anneal_rotate_enabled'] = self.ui.anneal_rotate_checkbox.isChecked()
             algo_kwargs['anneal_translate_enabled'] = self.ui.anneal_translate_checkbox.isChecked()
             algo_kwargs['anneal_random_shake_direction'] = self.ui.anneal_random_shake_checkbox.isChecked()
-            algo_kwargs['stability_tolerance'] = ui_params.get('stability_tolerance', 0.0001)
+            algo_kwargs['stability_tolerance'] = ui_params.get('stability_tolerance', 0.01)
+            algo_kwargs['anneal_curve'] = ui_params.get('anneal_curve', "Logarithmic")
+            algo_kwargs['anneal_min_amp'] = ui_params.get('anneal_min_amp', 0.1)
+            algo_kwargs['anneal_max_amp'] = ui_params.get('anneal_max_amp', 100.0)
+            algo_kwargs['anneal_rot_steps'] = ui_params.get('anneal_rot_steps', 10)
+            algo_kwargs['anneal_rot_curve'] = ui_params.get('anneal_rot_curve', "Logarithmic")
+            algo_kwargs['anneal_rot_min'] = ui_params.get('anneal_rot_min', 1.0)
+            algo_kwargs['anneal_rot_max'] = ui_params.get('anneal_rot_max', 90.0)
         else:
             if self.ui.minkowski_random_checkbox.isChecked():
                 algo_kwargs['search_direction'] = None

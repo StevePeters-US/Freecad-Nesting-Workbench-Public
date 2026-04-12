@@ -64,7 +64,7 @@ class NestingPanel(QtGui.QWidget):
         # Algorithm Selection
         self.algorithm_dropdown = QtGui.QComboBox()
         self.algorithm_dropdown.addItems(["Minkowski", "Physics"])
-        self.algorithm_dropdown.setCurrentIndex(1) # Default to Physics
+        self.algorithm_dropdown.setCurrentIndex(0) # Default to Minkowski
         self.algorithm_dropdown.currentTextChanged.connect(self._on_algorithm_change)
         form_layout.addRow("Nesting Algorithm:", self.algorithm_dropdown)
 
@@ -230,13 +230,25 @@ class NestingPanel(QtGui.QWidget):
         self.anneal_rotate_checkbox = QtGui.QCheckBox("Anneal Rotate"); self.anneal_rotate_checkbox.setChecked(True)
         self.anneal_translate_checkbox = QtGui.QCheckBox("Anneal Translate"); self.anneal_translate_checkbox.setChecked(True)
         self.anneal_random_shake_checkbox = QtGui.QCheckBox("Random Shake Direction")
+
+        self.physics_anneal_rot_steps = QtGui.QSpinBox(); self.physics_anneal_rot_steps.setRange(0, 500); self.physics_anneal_rot_steps.setValue(10)
+        self.physics_anneal_rot_curve_type = QtGui.QComboBox()
+        self.physics_anneal_rot_curve_type.addItems(["Logarithmic", "Linear", "Power 1.5", "Quadratic", "Exponential"])
+        self.physics_anneal_rot_min = QtGui.QDoubleSpinBox(); self.physics_anneal_rot_min.setRange(0.0, 360.0); self.physics_anneal_rot_min.setValue(1.0)
+        self.physics_anneal_rot_max = QtGui.QDoubleSpinBox(); self.physics_anneal_rot_max.setRange(0.0, 360.0); self.physics_anneal_rot_max.setValue(90.0)
         
-        self.physics_stability_tolerance_input = QtGui.QDoubleSpinBox()
-        self.physics_stability_tolerance_input.setRange(0.000001, 1.0)
-        self.physics_stability_tolerance_input.setValue(0.0001)
-        self.physics_stability_tolerance_input.setSingleStep(0.0001)
-        self.physics_stability_tolerance_input.setDecimals(6)
-        self.physics_stability_tolerance_input.setToolTip("Minimum score improvement required to reset simulation cycle. Prevents infinite loops from noise.")
+        self.physics_anneal_curve_type = QtGui.QComboBox()
+        self.physics_anneal_curve_type.addItems(["Logarithmic", "Linear", "Power 1.5", "Quadratic", "Exponential"])
+        
+        self.physics_anneal_min_amp = QtGui.QDoubleSpinBox(); self.physics_anneal_min_amp.setRange(0.0, 1000.0); self.physics_anneal_min_amp.setValue(0.1)
+        self.physics_anneal_max_amp = QtGui.QDoubleSpinBox(); self.physics_anneal_max_amp.setRange(0.0, 5000.0); self.physics_anneal_max_amp.setValue(100.0)
+        
+        self.physics_improvement_threshold_input = QtGui.QDoubleSpinBox()
+        self.physics_improvement_threshold_input.setRange(0.000001, 1.0)
+        self.physics_improvement_threshold_input.setValue(0.01)
+        self.physics_improvement_threshold_input.setSingleStep(0.01)
+        self.physics_improvement_threshold_input.setDecimals(6)
+        self.physics_improvement_threshold_input.setToolTip("Minimum score improvement required to reset simulation cycle. Prevents infinite loops from noise.")
 
         physics_form_layout.addRow("Gravity Direction:", physics_dial_layout)
         physics_form_layout.addRow(self.physics_random_checkbox)
@@ -250,20 +262,32 @@ class NestingPanel(QtGui.QWidget):
         self.physics_rotation_display_label.setFixedWidth(120)
         self.physics_rotation_steps_slider.valueChanged.connect(lambda: self._update_rotation_label())
 
+        physics_form_layout.addRow("Step Size:", self.physics_step_size_input)
+        physics_form_layout.addRow("Max Spawn Attempts:", self.physics_max_spawn_input)
+        physics_form_layout.addRow("Max Nesting Steps:", self.physics_max_nesting_steps_input)
+
+        physics_form_layout.addRow(QtGui.QLabel("")) # Spacer
+        physics_form_layout.addRow(QtGui.QLabel("--- Annealing (Shake) ---"))
+        
+        # Anneal Rotate Logic
+        physics_form_layout.addRow(self.anneal_rotate_checkbox)
         phys_rot_layout = QtGui.QHBoxLayout()
         phys_rot_layout.addWidget(self.physics_rotation_steps_slider)
         phys_rot_layout.addWidget(self.physics_rotation_display_label)
         physics_form_layout.addRow("Rotation Steps:", phys_rot_layout)
-
-        physics_form_layout.addRow("Step Size:", self.physics_step_size_input)
-        physics_form_layout.addRow("Max Spawn Attempts:", self.physics_max_spawn_input)
-        physics_form_layout.addRow("Max Nesting Steps:", self.physics_max_nesting_steps_input)
-        physics_form_layout.addRow(QtGui.QLabel("")) # Spacer
-        physics_form_layout.addRow(QtGui.QLabel("--- Annealing (Shake) ---"))
-        physics_form_layout.addRow("Anneal Steps:", self.physics_anneal_steps_input)
-        physics_form_layout.addRow("Stability Tolerance:", self.physics_stability_tolerance_input)
-        physics_form_layout.addRow(self.anneal_rotate_checkbox)
+        physics_form_layout.addRow("Rot Anneal Steps:", self.physics_anneal_rot_steps)
+        physics_form_layout.addRow("Rot Curve Type:", self.physics_anneal_rot_curve_type)
+        physics_form_layout.addRow("Rot Min Angle:", self.physics_anneal_rot_min)
+        physics_form_layout.addRow("Rot Max Angle:", self.physics_anneal_rot_max)
+        
+        # Anneal Translate Logic
         physics_form_layout.addRow(self.anneal_translate_checkbox)
+        physics_form_layout.addRow("Anneal Steps:", self.physics_anneal_steps_input)
+        physics_form_layout.addRow("Improvement Threshold:", self.physics_improvement_threshold_input)
+        physics_form_layout.addRow(QtGui.QLabel("")) # Spacer
+        physics_form_layout.addRow("Curve Type:", self.physics_anneal_curve_type)
+        physics_form_layout.addRow("Min Amplitude:", self.physics_anneal_min_amp)
+        physics_form_layout.addRow("Max Amplitude:", self.physics_anneal_max_amp)
         physics_form_layout.addRow(self.anneal_random_shake_checkbox)
 
         self.physics_settings_group.setLayout(physics_form_layout)
@@ -545,7 +569,16 @@ class NestingPanel(QtGui.QWidget):
         self.simplification_input.setValue(prefs.GetFloat(PROP_SIMPLIFICATION, 1.0))
         self.use_gpu_checkbox.setChecked(prefs.GetBool(PROP_USE_GPU, False))
         self.verbose_logging_checkbox.setChecked(prefs.GetBool("VerboseLogging", False))
-        self.physics_stability_tolerance_input.setValue(prefs.GetFloat("PhysicsStabilityTolerance", 0.0001))
+        self.physics_improvement_threshold_input.setValue(prefs.GetFloat("PhysicsStabilityTolerance", 0.01))
+        
+        self.physics_anneal_curve_type.setCurrentText(prefs.GetString("PhysicsAnnealCurveType", "Logarithmic"))
+        self.physics_anneal_min_amp.setValue(prefs.GetFloat("PhysicsAnnealMinAmp", 0.1))
+        self.physics_anneal_max_amp.setValue(prefs.GetFloat("PhysicsAnnealMaxAmp", 100.0))
+        
+        self.physics_anneal_rot_steps.setValue(prefs.GetInt("PhysicsAnnealRotSteps", 10))
+        self.physics_anneal_rot_curve_type.setCurrentText(prefs.GetString("PhysicsAnnealRotCurveType", "Logarithmic"))
+        self.physics_anneal_rot_min.setValue(prefs.GetFloat("PhysicsAnnealRotMin", 1.0))
+        self.physics_anneal_rot_max.setValue(prefs.GetFloat("PhysicsAnnealRotMax", 90.0))
         
         # Load Rotation Steps (Isolated)
         # Minkowski
