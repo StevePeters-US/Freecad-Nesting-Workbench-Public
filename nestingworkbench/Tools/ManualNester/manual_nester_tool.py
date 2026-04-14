@@ -309,7 +309,7 @@ class ManualNesterToolObserver:
                 if self.physics_enabled:
                     self._apply_physics(drag_delta)
                     if self.auto_rotate_enabled:
-                        self._auto_rotate()
+                        self._auto_rotate(drag_delta)
                 else:
                     self._enforce_no_overlap()
 
@@ -428,10 +428,9 @@ class ManualNesterToolObserver:
         if hasattr(self.panel_manager, 'form'):
             self.panel_manager.form.radius_spin.setValue(new_radius)
 
-        # Update indicator if actively dragging/grabbing
-        active = (self.input.is_mouse_down and self.input.is_implicit_drag) or self.input.is_free_grab
-        if active:
-            self.handle_move(self.input.last_known_screen_pos, True, False)
+        # Update the visual indicator only — do NOT call handle_move (would move the part)
+        if self.selected_obj and self.physics_enabled:
+            self._show_radius_indicator(self.selected_obj.Placement.Base, new_radius)
 
     def _on_constraint_toggle(self, axis):
         """X or Y key toggles the axis constraint."""
@@ -550,28 +549,176 @@ class ManualNesterToolObserver:
             if self.selected_obj in self.pre_drag_placements:
                 self.selected_obj.Placement = self.pre_drag_placements[self.selected_obj].copy()
 
-    def _auto_rotate(self):
-        """Try rotating the dragged part in 15° steps (both directions) to find the
-        smallest rotation that resolves all overlaps with same-sheet parts.
-        If no rotation within ±180° resolves the overlap, the part is left as-is."""
-        others = self._get_same_sheet_others()
-        if not self.collision_resolver.overlaps_any(self.selected_obj, others):
-            return  # Already clear, nothing to do
+    def _auto_rotate(self, drag_delta):
+        """Rotate the dragged part toward the weighted-average centroid of nearby parts.
 
-        base_placement = self.selected_obj.Placement.copy()
-        step = 15.0
-        # Try alternating: +15, -15, +30, -30, ...
-        for i in range(1, 13):  # up to ±180°
-            for sign in (1, -1):
-                angle_deg = sign * i * step
-                rot = FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), angle_deg)
-                trial = base_placement.copy()
-                trial.Rotation = rot.multiply(base_placement.Rotation)
-                self.selected_obj.Placement = trial
-                if not self.collision_resolver.overlaps_any(self.selected_obj, others):
-                    return  # Found a clear rotation
-        # Nothing worked — restore original
-        self.selected_obj.Placement = base_placement
+        Each frame the part rotates a small fraction of the delta between:
+          - where the centroid currently points (relative to pivot), and
+          - a blend of the weighted-centroid direction and the drag direction.
+
+        Weight for each nearby part = physics falloff factor (centre-to-centre distance).
+        Drag direction bias: 50/50 blend with the weighted-centroid direction.
+        Minimum rotation threshold: 0.1 degrees — smaller deltas are ignored.
+        Smooth application: 20% of the remaining delta per frame, scaled by drag speed.
+        """
+        MIN_ANGLE_DEG = 0.1
+        SMOOTH = 0.20  # fraction of delta applied per frame
+        SPEED_SCALE_MM = 5.0  # drag speed (mm/frame) at which full smooth factor applies
+
+        dragged_info = self._get_obj_phys_info(self.selected_obj)
+        if not dragged_info:
+            return
+        dragged_center, _, _ = dragged_info
+        pivot = self.selected_obj.Placement.Base
+
+        # Offset from pivot to centroid in world space
+        offset_x = dragged_center.x - pivot.x
+        offset_y = dragged_center.y - pivot.y
+        offset_len = math.sqrt(offset_x ** 2 + offset_y ** 2)
+
+        # If the centroid is effectively at the pivot, rotation can't move it —
+        # skip to avoid meaningless spin.
+        if offset_len < 0.1:
+            return
+
+        # Weighted-average direction from dragged centroid toward nearby part centroids.
+        # Direction vectors (unit) weighted by falloff factor.
+        w_dir_x = 0.0
+        w_dir_y = 0.0
+        total_weight = 0.0
+
+        for obj in self._get_same_sheet_others():
+            info = self._get_obj_phys_info(obj)
+            if not info:
+                continue
+            center, _, _ = info
+            dx = center.x - dragged_center.x
+            dy = center.y - dragged_center.y
+            dist = math.sqrt(dx ** 2 + dy ** 2)
+            if dist < 0.001:
+                continue
+            weight = self.physics_engine.compute_falloff(dist)
+            if weight < 0.001:
+                continue
+            w_dir_x += (dx / dist) * weight
+            w_dir_y += (dy / dist) * weight
+            total_weight += weight
+
+        if total_weight < 0.001:
+            return
+
+        # Normalise weighted direction
+        wd_len = math.sqrt(w_dir_x ** 2 + w_dir_y ** 2)
+        if wd_len < 0.001:
+            return
+        w_dir_x /= wd_len
+        w_dir_y /= wd_len
+
+        # Blend with drag direction (50/50) so the part tends to pack itself
+        # into the gap the drag is opening rather than just facing the cluster.
+        if drag_delta.Length > 0.001:
+            dd_x = drag_delta.x / drag_delta.Length
+            dd_y = drag_delta.y / drag_delta.Length
+            blend_x = w_dir_x + dd_x
+            blend_y = w_dir_y + dd_y
+            bl = math.sqrt(blend_x ** 2 + blend_y ** 2)
+            if bl > 0.001:
+                target_dir_x = blend_x / bl
+                target_dir_y = blend_y / bl
+            else:
+                target_dir_x, target_dir_y = w_dir_x, w_dir_y
+        else:
+            target_dir_x, target_dir_y = w_dir_x, w_dir_y
+
+        # The rotation that puts the centroid in *target_dir* from the pivot
+        # is the angle difference between that target direction and the current
+        # centroid direction.
+        target_angle_rad = math.atan2(target_dir_y, target_dir_x)
+        current_angle_rad = math.atan2(offset_y, offset_x)
+        centroid_delta_deg = math.degrees(target_angle_rad - current_angle_rad)
+
+        # Normalise to [-180, 180]
+        while centroid_delta_deg > 180:
+            centroid_delta_deg -= 360
+        while centroid_delta_deg < -180:
+            centroid_delta_deg += 360
+
+        # ---- Sheet-edge fitting ----
+        # When the part is near a sheet edge, blend in a rotation that aligns the
+        # part's long axis parallel to that edge so it packs as tightly as possible.
+        # edge_weight: 0 at influence radius, 1 at the edge itself.
+        edge_delta_deg = 0.0
+        edge_weight = 0.0
+
+        dragged_sheet = self._drag_active_sheet or self.obj_to_sheet.get(self.selected_obj)
+        if dragged_sheet:
+            boundary = next(
+                (c for c in dragged_sheet.Group if c.Label.startswith("Sheet_Boundary_")), None
+            )
+            if boundary and hasattr(boundary, "Shape"):
+                sheet_bb = boundary.Shape.BoundBox
+                part_bb = self._get_shape_bbox(self.selected_obj)
+                if part_bb:
+                    cx = (part_bb.XMin + part_bb.XMax) / 2.0
+                    cy = (part_bb.YMin + part_bb.YMax) / 2.0
+                    dist_l = cx - sheet_bb.XMin
+                    dist_r = sheet_bb.XMax - cx
+                    dist_b = cy - sheet_bb.YMin
+                    dist_t = sheet_bb.YMax - cy
+                    min_edge_dist = min(dist_l, dist_r, dist_b, dist_t)
+
+                    radius = self.physics_engine.radius
+                    if radius > 0.0 and min_edge_dist < radius:
+                        edge_weight = max(0.0, 1.0 - min_edge_dist / radius)
+                        near_vertical = (min_edge_dist == dist_l or min_edge_dist == dist_r)
+
+                        local_dims = self._get_local_bbox_dims(self.selected_obj)
+                        if local_dims:
+                            local_w, local_h = local_dims
+                            long_axis_is_x = local_w >= local_h
+
+                            # Current rotation: angle of the local X axis in world space
+                            x_axis = self.selected_obj.Placement.Rotation.multVec(
+                                FreeCAD.Vector(1, 0, 0)
+                            )
+                            current_rot_deg = math.degrees(math.atan2(x_axis.y, x_axis.x))
+
+                            # Target: align the long axis with the nearest edge direction.
+                            # Near a vertical edge → long axis should be vertical (±90°).
+                            # Near a horizontal edge → long axis should be horizontal (0°/180°).
+                            if near_vertical:
+                                target_rot_deg = 90.0 if long_axis_is_x else 0.0
+                            else:
+                                target_rot_deg = 0.0 if long_axis_is_x else 90.0
+
+                            # Shortest path with 180° periodicity (0° and 180° are equivalent)
+                            raw = target_rot_deg - current_rot_deg
+                            while raw > 90:
+                                raw -= 180
+                            while raw < -90:
+                                raw += 180
+                            edge_delta_deg = raw
+
+        # Blend centroid-attraction and edge-fitting by edge proximity
+        if edge_weight > 0.001:
+            delta_deg = centroid_delta_deg * (1.0 - edge_weight) + edge_delta_deg * edge_weight
+        else:
+            delta_deg = centroid_delta_deg
+
+        if abs(delta_deg) < MIN_ANGLE_DEG:
+            return
+
+        # Scale smooth factor by drag speed so fast drags feel responsive
+        speed_scale = min(1.0, drag_delta.Length / SPEED_SCALE_MM)
+        apply_deg = delta_deg * SMOOTH * speed_scale
+
+        if abs(apply_deg) < MIN_ANGLE_DEG:
+            return
+
+        rot = FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), apply_deg)
+        new_placement = self.selected_obj.Placement.copy()
+        new_placement.Rotation = rot.multiply(self.selected_obj.Placement.Rotation)
+        self.selected_obj.Placement = new_placement
 
     def _apply_physics(self, drag_delta):
         """Push nearby parts based on proximity to the dragged part."""
@@ -616,7 +763,7 @@ class ManualNesterToolObserver:
 
         displaced_objs = []
         for obj, displacement in displacements:
-            if displacement.Length > 0.01:  # Skip negligible moves
+            if displacement.Length > 0.0:
                 # M-009: Store pre-drag placement for undo if not already stored
                 if obj not in self.pre_drag_placements:
                     self.pre_drag_placements[obj] = obj.Placement.copy()
@@ -624,9 +771,6 @@ class ManualNesterToolObserver:
                 pl = obj.Placement
                 pl.Base = pl.Base + displacement
                 obj.Placement = pl
-                # Clamp immediately so displaced parts can't leave the sheet
-                if dragged_sheet_bbox:
-                    self.collision_resolver.clamp_to_sheet(obj, dragged_sheet_bbox)
                 displaced_objs.append(obj)
 
         if not displaced_objs:
@@ -637,31 +781,21 @@ class ManualNesterToolObserver:
         static_parts = [o for o in self.original_placements
                         if o != self.selected_obj and id(o) not in displaced_set]
 
-        for _ in range(3):
-            any_separated = False
+        # Single collision pass per frame — multi-iteration fighting is what causes stick-slip.
+        # max_iterations=1 keeps the correction light so physics pushes remain dominant.
+        for obj in displaced_objs:
+            self.collision_resolver.separate_overlapping(
+                obj, [self.selected_obj] + static_parts, max_iterations=1
+            )
+            if dragged_sheet_bbox:
+                self.collision_resolver.clamp_to_sheet(obj, dragged_sheet_bbox)
 
-            # Separate each displaced part from the dragged part and all static parts
-            for obj in displaced_objs:
-                b = obj.Placement.Base
-                pos_before = (b.x, b.y, b.z)
-                self.collision_resolver.separate_overlapping(obj, [self.selected_obj] + static_parts)
-                b = obj.Placement.Base
-                if (b.x, b.y, b.z) != pos_before:
-                    if dragged_sheet_bbox:
-                        self.collision_resolver.clamp_to_sheet(obj, dragged_sheet_bbox)
-                    any_separated = True
-
-            # Resolve overlaps between displaced neighbors
-            for i, obj in enumerate(displaced_objs):
-                for other in displaced_objs[i+1:]:
-                    if self.collision_resolver.resolve_bi_collision(obj, other):
-                        if dragged_sheet_bbox:
-                            self.collision_resolver.clamp_to_sheet(obj, dragged_sheet_bbox)
-                            self.collision_resolver.clamp_to_sheet(other, dragged_sheet_bbox)
-                        any_separated = True
-
-            if not any_separated:
-                break
+        for i, obj in enumerate(displaced_objs):
+            for other in displaced_objs[i + 1:]:
+                self.collision_resolver.resolve_bi_collision(obj, other)
+                if dragged_sheet_bbox:
+                    self.collision_resolver.clamp_to_sheet(obj, dragged_sheet_bbox)
+                    self.collision_resolver.clamp_to_sheet(other, dragged_sheet_bbox)
 
     def _get_shape_bbox(self, obj, parent_placement=None):
         """Returns the global BoundBox for an object, prioritizing BoundaryObject.
@@ -737,6 +871,31 @@ class ManualNesterToolObserver:
 
         center = FreeCAD.Vector((bb.XMin + bb.XMax) / 2.0, (bb.YMin + bb.YMax) / 2.0, 0)
         return center, bb.XLength, bb.YLength
+
+    def _get_local_bbox_dims(self, obj):
+        """Returns (width, height) of obj in local (un-rotated) coordinates.
+
+        Walks the same hierarchy as _get_shape_bbox but reads the raw Shape.BoundBox
+        without applying the placement rotation, so the result reflects the canonical
+        dimensions of the part's geometry rather than its current world orientation.
+        Returns None if no bounds found.
+        """
+        if hasattr(obj, "BoundaryObject") and obj.BoundaryObject and \
+                hasattr(obj.BoundaryObject.Shape, "BoundBox"):
+            bb = obj.BoundaryObject.Shape.BoundBox
+            return bb.XLength, bb.YLength
+
+        if hasattr(obj, "Group"):
+            for child in obj.Group:
+                result = self._get_local_bbox_dims(child)
+                if result:
+                    return result
+
+        if hasattr(obj, "Shape") and hasattr(obj.Shape, "BoundBox"):
+            bb = obj.Shape.BoundBox
+            return bb.XLength, bb.YLength
+
+        return None
 
     # ------------------------------------------------------------------
     # Operation lifecycle
