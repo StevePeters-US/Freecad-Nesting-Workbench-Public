@@ -15,6 +15,7 @@ from ...constants import *
 
 try:
     from .nesting_logic import nest, NestingDependencyError
+    from .visualization_manager import VisualizationManager
 except ImportError:
     pass
 
@@ -71,7 +72,7 @@ class NestingJob:
             
 
 
-    def run(self, quantities, master_map, rotation_params, algo_kwargs, is_simulating=False):
+    def run(self, quantities, master_map, rotation_params, algo_kwargs, is_simulating=False, viz_manager=None):
         """Executes the nesting logic: Prepare -> Nest -> Draw."""
         
         # 1. Prepare Shapes
@@ -96,6 +97,7 @@ class NestingJob:
             self.params['sheet_height'],
             self.params['rotation_steps'], 
             is_simulating, 
+            viz_manager=viz_manager,
             **algo_kwargs
         )
         
@@ -274,6 +276,8 @@ class NestingController:
         self.is_running = False
         self.cancel_requested = False
         
+        self.viz_manager = VisualizationManager()
+        
         # Initialize default fonts
         font_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'fonts'))
         default_font = os.path.join(font_dir, 'PoiretOne-Regular.ttf')
@@ -340,7 +344,7 @@ class NestingController:
             self.ui.nest_button.setEnabled(False)
             self.ui.cancel_button.setEnabled(True)
             self._execute_ga_nesting(target_layout, ui_params, quantities, master_map, 
-                                     rotation_params, algo_kwargs, is_simulating)
+                                     rotation_params, algo_kwargs, is_simulating, self.viz_manager)
         finally:
             self.is_running = False
             self.cancel_requested = False
@@ -376,121 +380,97 @@ class NestingController:
         self.ui.selected_shapes_to_process = []
         self.ui.hidden_originals = []
 
-        # Read parameters directly from the layout group's properties
-        if hasattr(layout_group, PROP_SHEET_WIDTH):
-            self.ui.sheet_width_input.setValue(getattr(layout_group, PROP_SHEET_WIDTH))
-        if hasattr(layout_group, PROP_SHEET_HEIGHT):
-            self.ui.sheet_height_input.setValue(getattr(layout_group, PROP_SHEET_HEIGHT))
-        if hasattr(layout_group, PROP_PART_SPACING):
-            self.ui.part_spacing_input.setValue(getattr(layout_group, PROP_PART_SPACING))
-        if hasattr(layout_group, PROP_SHEET_THICKNESS):
-            self.ui.sheet_thickness_input.setValue(getattr(layout_group, PROP_SHEET_THICKNESS))
+        # 1. Load Parameters (CR-116: use getattr(..., None))
+        self._load_params_from_layout(layout_group)
         
-        # Load deflection angle (new format) or convert old deflection mm to angle
-        if hasattr(layout_group, PROP_DEFLECTION_ANGLE):
-            self.ui.deflection_input.setValue(getattr(layout_group, PROP_DEFLECTION_ANGLE))
-        elif hasattr(layout_group, 'Deflection'):
-            # Backward compatibility: convert old Deflection (mm) to angle
-            deflection_angle = layout_group.Deflection * 200.0
-            self.ui.deflection_input.setValue(deflection_angle)
-            
-        if hasattr(layout_group, PROP_SIMPLIFICATION):
-            self.ui.simplification_input.setValue(getattr(layout_group, PROP_SIMPLIFICATION))
-        if hasattr(layout_group, PROP_FONT_FILE):
-            font_path = getattr(layout_group, PROP_FONT_FILE)
-            if os.path.exists(font_path):
-                self.ui.selected_font_path = font_path
-                self.ui.font_label.setText(os.path.basename(font_path))
-        if hasattr(layout_group, PROP_LABEL_SIZE):
-            self.ui.label_size_input.setValue(getattr(layout_group, PROP_LABEL_SIZE))
-        if hasattr(layout_group, PROP_GENERATIONS):
-            self.ui.minkowski_generations_input.setValue(getattr(layout_group, PROP_GENERATIONS))
-        if hasattr(layout_group, PROP_POPULATION_SIZE):
-            self.ui.minkowski_population_size_input.setValue(getattr(layout_group, PROP_POPULATION_SIZE))
-        if hasattr(layout_group, PROP_USE_GPU):
-            self.ui.use_gpu_checkbox.setChecked(getattr(layout_group, PROP_USE_GPU))
-        if hasattr(layout_group, PROP_NESTING_DIRECTION):
-            self.ui.minkowski_direction_dial.setValue(getattr(layout_group, PROP_NESTING_DIRECTION))
+        # 2. Load Shapes
+        self._load_shapes_from_layout(layout_group)
 
-        # Get the shapes from the layout
-        master_shapes_group = None
-        for child in layout_group.Group:
-            if child.Label.startswith("MasterShapes"):
-                master_shapes_group = child
-                break
+    def _load_params_from_layout(self, layout_group):
+        """Extracts algorithm parameters from layout properties."""
+        props_map = {
+            PROP_SHEET_WIDTH: self.ui.sheet_width_input,
+            PROP_SHEET_HEIGHT: self.ui.sheet_height_input,
+            PROP_PART_SPACING: self.ui.part_spacing_input,
+            PROP_SHEET_THICKNESS: self.ui.sheet_thickness_input,
+            PROP_SIMPLIFICATION: self.ui.simplification_input,
+            PROP_LABEL_SIZE: self.ui.label_size_input,
+            PROP_GENERATIONS: self.ui.minkowski_generations_input,
+            PROP_POPULATION_SIZE: self.ui.minkowski_population_size_input,
+            PROP_NESTING_DIRECTION: self.ui.minkowski_direction_dial,
+        }
         
-        if master_shapes_group:
-            # The master shapes are now copies inside this group.
-            # We need to find the actual ShapeObject inside each 'master_' container,
-            # as that is what the processing logic expects.
-            shapes_to_load = []
-            quantities = {}
-            rotation_overrides = {}
-            rotation_steps_map = {}
-            up_directions = {}
-            fill_sheet_map = {}
+        for prop, widget in props_map.items():
+            val = getattr(layout_group, prop, None)
+            if val is not None: widget.setValue(val)
             
-            for master_container in master_shapes_group.Group:
-                # Use a relaxed check for the container to ensure robust loading.
-                if hasattr(master_container, "Group"):
-                    # The object to load is the 'master_shape_...' object inside the container.
-                    shape_obj = next((child for child in master_container.Group if child.Label.startswith("master_shape_")), None)
-                    if shape_obj and hasattr(shape_obj, "Shape"):
-                        shapes_to_load.append(shape_obj)
-                        
-                        # Recover properties from container
-                        quantities[shape_obj.Label] = getattr(master_container, "Quantity", 1)
-                        
-                        if hasattr(master_container, "PartRotationOverride"):
-                            rotation_overrides[shape_obj.Label] = master_container.PartRotationOverride
-                        if hasattr(master_container, "PartRotationSteps"):
-                            rotation_steps_map[shape_obj.Label] = master_container.PartRotationSteps
-                        if hasattr(master_container, "UpDirection"):
-                            up_directions[shape_obj.Label] = master_container.UpDirection
-                        if hasattr(master_container, "FillSheet"):
-                            fill_sheet_map[shape_obj.Label] = master_container.FillSheet
+        # Deflection (Special handling)
+        deflection_angle = getattr(layout_group, PROP_DEFLECTION_ANGLE, None)
+        if deflection_angle is not None:
+            self.ui.deflection_input.setValue(deflection_angle)
+        elif hasattr(layout_group, 'Deflection'):
+            self.ui.deflection_input.setValue(layout_group.Deflection * 200.0)
             
-            self.load_shapes(
-                shapes_to_load, 
-                is_reloading_layout=True, 
-                initial_quantities=quantities,
-                initial_overrides=rotation_overrides,
-                initial_rotation_steps=rotation_steps_map,
-                initial_up_directions=up_directions,
-                initial_fill_sheet=fill_sheet_map
-            )
+        # Checkboxes/Labels
+        use_gpu = getattr(layout_group, PROP_USE_GPU, None)
+        if use_gpu is not None: self.ui.use_gpu_checkbox.setChecked(use_gpu)
+        
+        font_path = getattr(layout_group, PROP_FONT_FILE, None)
+        if font_path and os.path.exists(font_path):
+            self.ui.selected_font_path = font_path
+            self.ui.font_label.setText(os.path.basename(font_path))
+
+        # Global Rotation Steps
+        steps = getattr(layout_group, PROP_GLOBAL_ROTATION_STEPS, 0)
+        if steps > 0:
+            target_angle = 360.0 / steps
+            algo = getattr(layout_group, "Algorithm", "Minkowski")
+            self.ui.algorithm_dropdown.setCurrentText(algo)
             
-            # Load Global Rotation Steps if present
-            if hasattr(layout_group, PROP_GLOBAL_ROTATION_STEPS):
-                steps = getattr(layout_group, PROP_GLOBAL_ROTATION_STEPS)
-                if steps > 0:
-                    target_angle = 360.0 / steps
-                    # Find closest angle in appropriate mapping
-                    closest_idx = 0
-                    min_diff = float('inf')
-                    
-                    # Logic depends on algorithm of the layout
-                    is_physics = getattr(layout_group, "Algorithm", "") == "Physics"
-                    if is_physics:
-                        self.ui.algorithm_dropdown.setCurrentText("Physics")
-                        phys_angles = [360, 90, 45, 30, 15, 10, 5, 2, 1]
-                        for i, angle in enumerate(phys_angles):
-                            diff = abs(angle - target_angle)
-                            if diff < min_diff:
-                                min_diff = diff
-                                closest_idx = i
-                        self.ui.physics_rotation_steps_slider.setValue(closest_idx)
-                    else:
-                        self.ui.algorithm_dropdown.setCurrentText("Minkowski")
-                        for i, angle in enumerate(self.ui.rotation_angles):
-                            diff = abs(angle - target_angle)
-                            if diff < min_diff:
-                                min_diff = diff
-                                closest_idx = i
-                        self.ui.minkowski_rotation_steps_slider.setValue(closest_idx)
-        else:
-            FreeCAD.Console.PrintMessage(f"  WARNING: No MasterShapes group found!\n")
-            self.ui.status_label.setText("Warning: Could not find 'MasterShapes' group in the selected layout.")
+            angles = ROTATION_ANGLE_PRESETS if algo == "Physics" else self.ui.rotation_angles
+            slider = self.ui.physics_rotation_steps_slider if algo == "Physics" else self.ui.minkowski_rotation_steps_slider
+            
+            closest_idx = 0
+            min_diff = float('inf')
+            for i, angle in enumerate(angles):
+                diff = abs(angle - target_angle)
+                if diff < min_diff:
+                    min_diff, closest_idx = diff, i
+            slider.setValue(closest_idx)
+
+    def _load_shapes_from_layout(self, layout_group):
+        """Identifies master shapes and their quantities/overrides."""
+        master_shapes_group = next((c for c in layout_group.Group if c.Label.startswith("MasterShapes")), None)
+        
+        if not master_shapes_group:
+            FreeCAD.Console.PrintWarning(f"  WARNING: No MasterShapes group found in '{layout_group.Label}'\n")
+            self.ui.status_label.setText("Warning: Could not find 'MasterShapes' group.")
+            return
+
+        shapes_to_load = []
+        quantities, overrides, steps_map, up_dirs, fill_map = {}, {}, {}, {}, {}
+        
+        for master in master_shapes_group.Group:
+            if not hasattr(master, "Group"): continue
+            
+            shape_obj = next((child for child in master.Group if child.Label.startswith("master_shape_")), None)
+            if shape_obj and hasattr(shape_obj, "Shape"):
+                shapes_to_load.append(shape_obj)
+                label = shape_obj.Label
+                
+                quantities[label] = getattr(master, "Quantity", 1)
+                
+                # Use helper to restore params (CR-108b hint)
+                overrides[label] = getattr(master, "PartRotationOverride", [])
+                steps_map[label] = getattr(master, "PartRotationSteps", 0)
+                up_dirs[label] = getattr(master, "UpDirection", "Z+")
+                fill_map[label] = getattr(master, "FillSheet", False)
+        
+        self.load_shapes(
+            shapes_to_load, is_reloading_layout=True, initial_quantities=quantities,
+            initial_overrides=overrides, initial_rotation_steps=steps_map,
+            initial_up_directions=up_dirs, initial_fill_sheet=fill_map
+        )
 
     def _extract_parts_from_selection(self, selection):
         """
@@ -594,15 +574,11 @@ class NestingController:
             if initial_fill_sheet and obj.Label in initial_fill_sheet:
                 fill = initial_fill_sheet[obj.Label]
 
-            # We assume _add_part_row is still on UI or moved to a public method on UI
-            # Plan says it stays on UI but exposed. Let's assume it's publicly accessible as add_part_row now.
-            if hasattr(self.ui, 'add_part_row'):
-                 self.ui.add_part_row(i, display_label, quantity=qty, rotation_steps=steps, 
-                                      override_rotation=override, up_direction=up_dir, fill_sheet=fill)
-            elif hasattr(self.ui, '_add_part_row'):
-                 # Fallback if I haven't renamed it yet (I should rename it in next step)
-                 self.ui._add_part_row(i, display_label, quantity=qty, rotation_steps=steps, 
-                                      override_rotation=override, up_direction=up_dir, fill_sheet=fill)
+            # We assume add_part_row is on UI
+            add_row_fn = getattr(self.ui, 'add_part_row', getattr(self.ui, '_add_part_row', None))
+            if add_row_fn:
+                 add_row_fn(i, display_label, quantity=qty, rotation_steps=steps, 
+                            override_rotation=override, up_direction=up_dir, fill_sheet=fill)
         
         self.ui.shape_table.resizeColumnsToContents()
         self.ui.status_label.setText(f"{len(selection)} unique object(s) selected. Specify quantities and nest.")
@@ -637,10 +613,9 @@ class NestingController:
                 # Determine quantity from selection count
                 qty = selection_counts.get(obj, 1)
                 
-                if hasattr(self.ui, 'add_part_row'):
-                    self.ui.add_part_row(row_position, obj.Label, quantity=qty)
-                elif hasattr(self.ui, '_add_part_row'):
-                    self.ui._add_part_row(row_position, obj.Label, quantity=qty)
+                add_row_fn = getattr(self.ui, 'add_part_row', getattr(self.ui, '_add_part_row', None))
+                if add_row_fn:
+                    add_row_fn(row_position, obj.Label, quantity=qty)
                     
                 self.ui.selected_shapes_to_process.append(obj)
                 added_count += 1
@@ -673,7 +648,7 @@ class NestingController:
         if algo == "Physics":
             idx = self.ui.physics_rotation_steps_slider.value()
             # Mapping: 360(1), 90(4), 45(8), 30(12), 15(24), 10(36), 5(72), 2(180), 1(360)
-            angles = [360, 90, 45, 30, 15, 10, 5, 2, 1]
+            angles = ROTATION_ANGLE_PRESETS
             if idx < len(angles):
                 angle = angles[idx]
                 return int(360 / angle)
@@ -687,7 +662,7 @@ class NestingController:
         return 1
 
     def _execute_ga_nesting(self, target_layout, ui_params, quantities, master_map, 
-                            rotation_params, algo_kwargs, is_simulating):
+                            rotation_params, algo_kwargs, is_simulating, viz_manager=None):
         """GA optimization using multiple layouts."""
         coordinator = GACoordinator(
             doc=self.doc,
@@ -701,7 +676,7 @@ class NestingController:
         )
         self.current_job = coordinator.run(
             target_layout, ui_params, quantities, master_map,
-            rotation_params, algo_kwargs, is_simulating
+            rotation_params, algo_kwargs, is_simulating, viz_manager=viz_manager
         )
     
     def finalize_job(self):
@@ -911,7 +886,7 @@ class NestingController:
         mink_steps = int(360 / self.ui.rotation_angles[self.ui.minkowski_rotation_steps_slider.value()])
         prefs.SetInt("MinkowskiRotationSteps", mink_steps)
         
-        phys_angles = [360, 90, 45, 30, 15, 10, 5, 2, 1]
+        phys_angles = ROTATION_ANGLE_PRESETS
         phys_steps = int(360 / phys_angles[self.ui.physics_rotation_steps_slider.value()])
         prefs.SetInt("PhysicsRotationSteps", phys_steps)
 

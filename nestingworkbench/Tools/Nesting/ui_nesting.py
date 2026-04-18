@@ -20,7 +20,7 @@ _DEFAULTS = {
     "sheet_thickness": 3.0,
     "deflection_angle": 30.0,
     "verbose_logging": False,
-    "rotation_angles": [360, 180, 120, 90, 45, 30, 15, 10, 5, 1],
+    "rotation_angles": MINKOWSKI_ROTATION_PRESETS,
 }
 
 class NestingPanel(QtGui.QWidget):
@@ -598,7 +598,7 @@ class NestingPanel(QtGui.QWidget):
         phys_rot_steps = prefs.GetInt("PhysicsRotationSteps", 4) # Default 90 deg (4 steps)
         if phys_rot_steps > 0:
             target_angle = 360.0 / phys_rot_steps
-            phys_angles = [360, 90, 45, 30, 15, 10, 5, 2, 1]
+            phys_angles = ROTATION_ANGLE_PRESETS
             closest_idx = 0
             min_diff = float('inf')
             for i, angle in enumerate(phys_angles):
@@ -636,7 +636,7 @@ class NestingPanel(QtGui.QWidget):
         
         if algo == "Physics":
             value = self.physics_rotation_steps_slider.value()
-            angles = [360, 90, 45, 30, 15, 10, 5, 2, 1]
+            angles = ROTATION_ANGLE_PRESETS
             if value < len(angles):
                 angle = angles[value]
                 steps = int(360 / angle) if angle > 0 else 1

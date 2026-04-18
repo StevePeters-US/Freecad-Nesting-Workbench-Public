@@ -236,111 +236,83 @@ class ShapePreparer:
         return temp_master_obj, temp_shape_wrapper
 
     def _handle_new_master(self, master_obj, label, quantities, temp_shape_wrapper, spacing, deflection, simplification, cache_key, master_shapes_group, is_reloading, verbose=False):
-        # Get part parameters from quantities
-        part_params = quantities.get(label, {'quantity': 1, 'up_direction': 'Z+'})
-        if isinstance(part_params, tuple):
-            up_direction = 'Z+'
-        else:
-            up_direction = part_params.get('up_direction', 'Z+')
-        
+        # 1. Prepare Shape wrapper if not already in cache
         if not temp_shape_wrapper:
+            # Get up_direction for initial processing
+            part_params = quantities.get(label, {'up_direction': 'Z+'})
+            up_direction = part_params[0] if isinstance(part_params, tuple) else part_params.get('up_direction', 'Z+')
+            
             temp_shape_wrapper = Shape(master_obj)
             shape_processor.create_single_nesting_part(temp_shape_wrapper, master_obj, spacing, deflection, simplification, up_direction, verbose=verbose)
             self.processed_shape_cache[cache_key] = copy.deepcopy(temp_shape_wrapper)
 
-        master_container = self.doc.addObject("App::Part", f"master_{label}")
-        
-        # Get part parameters from quantities dict (now a dict of dicts)
-        part_params = quantities.get(label, {'quantity': 1, 'rotation_steps': 1, 'up_direction': 'Z+', 'fill_sheet': False})
-        if isinstance(part_params, tuple):
-            # Legacy format: (quantity, rotation_steps)
-            quantity = part_params[0]
-            up_direction = 'Z+'
-            fill_sheet = False
-        else:
-            quantity = part_params.get('quantity', 1)
-            up_direction = part_params.get('up_direction', 'Z+')
-            fill_sheet = part_params.get('fill_sheet', False)
-        
-        # Store properties
-        master_container.addProperty("App::PropertyInteger", "Quantity", "Nest", "Number of instances").Quantity = quantity
-        master_container.addProperty("App::PropertyString", "UpDirection", "Nest", "Up direction for 2D projection").UpDirection = up_direction
-        master_container.addProperty("App::PropertyBool", "FillSheet", "Nest", "Use to fill remaining space").FillSheet = fill_sheet
-
-        # *** CLEAN OFFSET DESIGN ***
-        # Store the source_centroid as a property on the container - this is THE source of truth
-        # for the offset between the Shapely polygon (centered at 0,0) and the FreeCAD geometry
-        master_container.addProperty("App::PropertyVector", "SourceCentroid", "Nesting", "Original geometry center")
+        # 2. Determine Source Centroid
         if temp_shape_wrapper.source_centroid is not None:
-            master_container.SourceCentroid = temp_shape_wrapper.source_centroid
+            source_centroid = temp_shape_wrapper.source_centroid
         else:
-            # Fallback: use the shape's bounding box center (safer than CenterOfMass for Compounds)
-            # Must match logic in shape_processor: transform effectively to world coords first
+            # Fallback: calculate from shape bounding box
             temp_shape = master_obj.Shape.copy()
             if master_obj.Placement and not master_obj.Placement.isIdentity():
                 temp_shape.transformShape(master_obj.Placement.Matrix)
-            
             bb = temp_shape.BoundBox
-            master_container.SourceCentroid = FreeCAD.Vector(
-                (bb.XMin + bb.XMax) / 2,
-                (bb.YMin + bb.YMax) / 2,
-                (bb.ZMin + bb.ZMax) / 2
-            )
+            source_centroid = FreeCAD.Vector((bb.XMin + bb.XMax) / 2, (bb.YMin + bb.YMax) / 2, (bb.ZMin + bb.ZMax) / 2)
 
-        # Make container visible during nesting (child boundary visibility is toggled by highlighting)
-        if hasattr(master_container, "ViewObject"):
-            master_container.ViewObject.Visibility = True
+        # 3. Create Master Container
+        master_container, up_direction = self._create_master_container(label, quantities, source_centroid)
         
-        # DEBUG: Try using Part::Feature directly instead of custom object
+        # 4. Create Master Shape Object
         master_shape_obj = self.doc.addObject("Part::Feature", f"master_shape_{label}")
-        # Add required properties manually since we're not using ShapeObject
         if not hasattr(master_shape_obj, "ShowBounds"):
             master_shape_obj.addProperty("App::PropertyBool", "ShowBounds", "Display", "").ShowBounds = False
         if not hasattr(master_shape_obj, "BoundaryObject"):
             master_shape_obj.addProperty("App::PropertyLink", "BoundaryObject", "Nesting", "")
         
-        # Get shape geometry and center it at (0,0,0).
-        # This keeps Placement.Base at (0,0,0) which avoids App::Part container corruption.
+        # 5. Position and rotate geometry
         original_shape = master_obj.Shape.copy()
-        is_2d_object = master_obj.isDerivedFrom("Part::Part2DObject")
         if verbose:
             FreeCAD.Console.PrintMessage(f"  -> Creating master for '{label}' (type: {master_obj.TypeId}) with up_direction='{up_direction}'\n")
         
-        # Use source_centroid (which includes buffering offset) to match polygon centering.
-        if temp_shape_wrapper.source_centroid:
-            center_point = temp_shape_wrapper.source_centroid
-        else:
-            actual_bb = original_shape.BoundBox
-            center_point = FreeCAD.Vector(
-                (actual_bb.XMin + actual_bb.XMax) / 2,
-                (actual_bb.YMin + actual_bb.YMax) / 2,
-                (actual_bb.ZMin + actual_bb.ZMax) / 2
-            )
-        
-        if is_2d_object:
+        if master_obj.isDerivedFrom("Part::Part2DObject"):
             plc = master_obj.Placement
-            offset = FreeCAD.Vector(center_point.x, center_point.y, center_point.z)
-            original_shape = self._rebuild_2d_shape(master_obj, original_shape, center_point, plc, offset, verbose, label)
+            offset = FreeCAD.Vector(source_centroid.x, source_centroid.y, source_centroid.z)
+            original_shape = self._rebuild_2d_shape(master_obj, original_shape, source_centroid, plc, offset, verbose, label)
         else:
-            original_shape = self._center_3d_shape(master_obj, original_shape, center_point)
+            original_shape = self._center_3d_shape(master_obj, original_shape, source_centroid)
         
         master_shape_obj.Shape = original_shape
-        
-        if verbose:
-            FreeCAD.Console.PrintMessage(f"     Centered from ({center_point.x:.2f}, {center_point.y:.2f}) to origin\n")
-        
-        # Get up_direction rotation (Placement has NO translation — only rotation)
-        up_rotation = get_up_direction_rotation(up_direction)
-        master_shape_obj.Placement = FreeCAD.Placement(FreeCAD.Vector(0, 0, 0), up_rotation)
+        master_shape_obj.Placement = FreeCAD.Placement(FreeCAD.Vector(0, 0, 0), get_up_direction_rotation(up_direction))
         
         if hasattr(master_shape_obj, "ViewObject"):
             master_shape_obj.ViewObject.Visibility = True
         master_container.addObject(master_shape_obj)
 
+        # 6. Finalize
         self._create_boundary_object(master_container, master_shape_obj, temp_shape_wrapper, verbose)
-        
         master_shapes_group.addObject(master_container)
+        
         return master_shape_obj, temp_shape_wrapper
+
+    def _create_master_container(self, label, quantities, source_centroid):
+        """Creates the App::Part container and populates it with metadata properties."""
+        master_container = self.doc.addObject("App::Part", f"master_{label}")
+        
+        part_params = quantities.get(label, {'quantity': 1, 'up_direction': 'Z+', 'fill_sheet': False})
+        if isinstance(part_params, tuple):
+            quantity, up_direction, fill_sheet = part_params[0], 'Z+', False
+        else:
+            quantity = part_params.get('quantity', 1)
+            up_direction = part_params.get('up_direction', 'Z+')
+            fill_sheet = part_params.get('fill_sheet', False)
+        
+        master_container.addProperty("App::PropertyInteger", "Quantity", "Nest", "Number of instances").Quantity = quantity
+        master_container.addProperty("App::PropertyString", "UpDirection", "Nest", "Up direction for 2D projection").UpDirection = up_direction
+        master_container.addProperty("App::PropertyBool", "FillSheet", "Nest", "Use to fill remaining space").FillSheet = fill_sheet
+        master_container.addProperty("App::PropertyVector", "SourceCentroid", "Nesting", "Original geometry center").SourceCentroid = source_centroid
+
+        if hasattr(master_container, "ViewObject"):
+            master_container.ViewObject.Visibility = True
+            
+        return master_container, up_direction
 
     def _rebuild_2d_shape(self, master_obj, original_shape, center_point, plc, offset, verbose, label):
         """Rebuilds 2D shape by transforming each edge's curve parameters to preserve smooth curves."""

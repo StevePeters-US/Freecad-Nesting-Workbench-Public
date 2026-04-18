@@ -207,7 +207,7 @@ class CollisionResolver:
                 placement.multVec(type(placement.Base)(bb.XMin, bb.YMax, 0)),
                 placement.multVec(type(placement.Base)(bb.XMax, bb.YMax, 0)),
             ]
-        except Exception:
+        except (TypeError, AttributeError, NameError):
             # Fallback: FreeCAD.Vector not available (unit tests)
             import FreeCAD
             corners = [

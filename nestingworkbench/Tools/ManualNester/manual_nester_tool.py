@@ -549,175 +549,106 @@ class ManualNesterToolObserver:
                 self.selected_obj.Placement = self.pre_drag_placements[self.selected_obj].copy()
 
     def _auto_rotate(self, drag_delta):
-        """Rotate the dragged part toward the weighted-average centroid of nearby parts.
-
-        Each frame the part rotates a small fraction of the delta between:
-          - where the centroid currently points (relative to pivot), and
-          - a blend of the weighted-centroid direction and the drag direction.
-
-        Weight for each nearby part = physics falloff factor (centre-to-centre distance).
-        Drag direction bias: 50/50 blend with the weighted-centroid direction.
-        Minimum rotation threshold: 0.1 degrees — smaller deltas are ignored.
-        Smooth application: 20% of the remaining delta per frame, scaled by drag speed.
-        """
+        """Rotate the dragged part toward the weighted-average centroid of nearby parts."""
         MIN_ANGLE_DEG = 0.1
-        SMOOTH = 0.20  # fraction of delta applied per frame
-        SPEED_SCALE_MM = 5.0  # drag speed (mm/frame) at which full smooth factor applies
+        SMOOTH = 0.20
+        SPEED_SCALE_MM = 5.0
 
         dragged_info = self._get_obj_phys_info(self.selected_obj)
-        if not dragged_info:
-            return
+        if not dragged_info: return
         dragged_center, _, _ = dragged_info
-        pivot = self.selected_obj.Placement.Base
 
-        # Offset from pivot to centroid in world space
-        offset_x = dragged_center.x - pivot.x
-        offset_y = dragged_center.y - pivot.y
-        offset_len = math.sqrt(offset_x ** 2 + offset_y ** 2)
+        # 1. Centroid Attraction
+        centroid_delta_deg = self._get_centroid_attraction_delta(dragged_center, drag_delta)
+        if centroid_delta_deg is None: return
 
-        # If the centroid is effectively at the pivot, rotation can't move it —
-        # skip to avoid meaningless spin.
-        if offset_len < 0.1:
-            return
+        # 2. Sheet-edge fitting
+        edge_delta_deg, edge_weight = self._get_edge_alignment_delta(self.selected_obj)
 
-        # Weighted-average direction from dragged centroid toward nearby part centroids.
-        # Direction vectors (unit) weighted by falloff factor.
-        w_dir_x = 0.0
-        w_dir_y = 0.0
-        total_weight = 0.0
-
-        for obj in self._get_same_sheet_others():
-            info = self._get_obj_phys_info(obj)
-            if not info:
-                continue
-            center, _, _ = info
-            dx = center.x - dragged_center.x
-            dy = center.y - dragged_center.y
-            dist = math.sqrt(dx ** 2 + dy ** 2)
-            if dist < 0.001:
-                continue
-            weight = self.physics_engine.compute_falloff(dist)
-            if weight < 0.001:
-                continue
-            w_dir_x += (dx / dist) * weight
-            w_dir_y += (dy / dist) * weight
-            total_weight += weight
-
-        if total_weight < 0.001:
-            return
-
-        # Normalise weighted direction
-        wd_len = math.sqrt(w_dir_x ** 2 + w_dir_y ** 2)
-        if wd_len < 0.001:
-            return
-        w_dir_x /= wd_len
-        w_dir_y /= wd_len
-
-        # Blend with drag direction (50/50) so the part tends to pack itself
-        # into the gap the drag is opening rather than just facing the cluster.
-        if drag_delta.Length > 0.001:
-            dd_x = drag_delta.x / drag_delta.Length
-            dd_y = drag_delta.y / drag_delta.Length
-            blend_x = w_dir_x + dd_x
-            blend_y = w_dir_y + dd_y
-            bl = math.sqrt(blend_x ** 2 + blend_y ** 2)
-            if bl > 0.001:
-                target_dir_x = blend_x / bl
-                target_dir_y = blend_y / bl
-            else:
-                target_dir_x, target_dir_y = w_dir_x, w_dir_y
-        else:
-            target_dir_x, target_dir_y = w_dir_x, w_dir_y
-
-        # The rotation that puts the centroid in *target_dir* from the pivot
-        # is the angle difference between that target direction and the current
-        # centroid direction.
-        target_angle_rad = math.atan2(target_dir_y, target_dir_x)
-        current_angle_rad = math.atan2(offset_y, offset_x)
-        centroid_delta_deg = math.degrees(target_angle_rad - current_angle_rad)
-
-        # Normalise to [-180, 180]
-        while centroid_delta_deg > 180:
-            centroid_delta_deg -= 360
-        while centroid_delta_deg < -180:
-            centroid_delta_deg += 360
-
-        # ---- Sheet-edge fitting ----
-        # When the part is near a sheet edge, blend in a rotation that aligns the
-        # part's long axis parallel to that edge so it packs as tightly as possible.
-        # edge_weight: 0 at influence radius, 1 at the edge itself.
-        edge_delta_deg = 0.0
-        edge_weight = 0.0
-
-        dragged_sheet = self._drag_active_sheet or self.obj_to_sheet.get(self.selected_obj)
-        if dragged_sheet:
-            boundary = next(
-                (c for c in dragged_sheet.Group if c.Label.startswith("Sheet_Boundary_")), None
-            )
-            if boundary and hasattr(boundary, "Shape"):
-                sheet_bb = boundary.Shape.BoundBox
-                part_bb = self._get_shape_bbox(self.selected_obj)
-                if part_bb:
-                    cx = (part_bb.XMin + part_bb.XMax) / 2.0
-                    cy = (part_bb.YMin + part_bb.YMax) / 2.0
-                    dist_l = cx - sheet_bb.XMin
-                    dist_r = sheet_bb.XMax - cx
-                    dist_b = cy - sheet_bb.YMin
-                    dist_t = sheet_bb.YMax - cy
-                    min_edge_dist = min(dist_l, dist_r, dist_b, dist_t)
-
-                    radius = self.physics_engine.radius
-                    if radius > 0.0 and min_edge_dist < radius:
-                        edge_weight = max(0.0, 1.0 - min_edge_dist / radius)
-                        near_vertical = (min_edge_dist == dist_l or min_edge_dist == dist_r)
-
-                        local_dims = self._get_local_bbox_dims(self.selected_obj)
-                        if local_dims:
-                            local_w, local_h = local_dims
-                            long_axis_is_x = local_w >= local_h
-
-                            # Current rotation: angle of the local X axis in world space
-                            x_axis = self.selected_obj.Placement.Rotation.multVec(
-                                FreeCAD.Vector(1, 0, 0)
-                            )
-                            current_rot_deg = math.degrees(math.atan2(x_axis.y, x_axis.x))
-
-                            # Target: align the long axis with the nearest edge direction.
-                            # Near a vertical edge → long axis should be vertical (±90°).
-                            # Near a horizontal edge → long axis should be horizontal (0°/180°).
-                            if near_vertical:
-                                target_rot_deg = 90.0 if long_axis_is_x else 0.0
-                            else:
-                                target_rot_deg = 0.0 if long_axis_is_x else 90.0
-
-                            # Shortest path with 180° periodicity (0° and 180° are equivalent)
-                            raw = target_rot_deg - current_rot_deg
-                            while raw > 90:
-                                raw -= 180
-                            while raw < -90:
-                                raw += 180
-                            edge_delta_deg = raw
-
-        # Blend centroid-attraction and edge-fitting by edge proximity
+        # 3. Blend
         if edge_weight > 0.001:
             delta_deg = centroid_delta_deg * (1.0 - edge_weight) + edge_delta_deg * edge_weight
         else:
             delta_deg = centroid_delta_deg
 
-        if abs(delta_deg) < MIN_ANGLE_DEG:
-            return
+        if abs(delta_deg) < MIN_ANGLE_DEG: return
 
-        # Scale smooth factor by drag speed so fast drags feel responsive
+        # 4. Apply smooth incremental rotation
         speed_scale = min(1.0, drag_delta.Length / SPEED_SCALE_MM)
         apply_deg = delta_deg * SMOOTH * speed_scale
 
-        if abs(apply_deg) < MIN_ANGLE_DEG:
-            return
+        if abs(apply_deg) >= MIN_ANGLE_DEG:
+            rot = FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), apply_deg)
+            new_placement = self.selected_obj.Placement.copy()
+            new_placement.Rotation = rot.multiply(self.selected_obj.Placement.Rotation)
+            self.selected_obj.Placement = new_placement
 
-        rot = FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), apply_deg)
-        new_placement = self.selected_obj.Placement.copy()
-        new_placement.Rotation = rot.multiply(self.selected_obj.Placement.Rotation)
-        self.selected_obj.Placement = new_placement
+    def _get_centroid_attraction_delta(self, dragged_center, drag_delta):
+        """Calculates rotation delta to point the centroid toward nearby parts and drag direction."""
+        pivot = self.selected_obj.Placement.Base
+        offset_x, offset_y = dragged_center.x - pivot.x, dragged_center.y - pivot.y
+        offset_len = math.sqrt(offset_x ** 2 + offset_y ** 2)
+        if offset_len < 0.1: return None
+
+        w_dir_x, w_dir_y, total_weight = 0.0, 0.0, 0.0
+        for obj in self._get_same_sheet_others():
+            info = self._get_obj_phys_info(obj)
+            if not info: continue
+            center, _, _ = info
+            dx, dy = center.x - dragged_center.x, center.y - dragged_center.y
+            dist = math.sqrt(dx ** 2 + dy ** 2)
+            if dist < 0.001: continue
+            weight = self.physics_engine.compute_falloff(dist)
+            if weight < 0.001: continue
+            w_dir_x += (dx / dist) * weight
+            w_dir_y += (dy / dist) * weight
+            total_weight += weight
+
+        if total_weight < 0.001: return None
+        wd_len = math.sqrt(w_dir_x ** 2 + w_dir_y ** 2)
+        if wd_len < 0.001: return None
+        w_dir_x, w_dir_y = w_dir_x / wd_len, w_dir_y / wd_len
+
+        # Blend with drag
+        if drag_delta.Length > 0.001:
+            blend_x, blend_y = w_dir_x + (drag_delta.x / drag_delta.Length), w_dir_y + (drag_delta.y / drag_delta.Length)
+            bl = math.sqrt(blend_x ** 2 + blend_y ** 2)
+            target_dir_x, target_dir_y = (blend_x / bl, blend_y / bl) if bl > 0.001 else (w_dir_x, w_dir_y)
+        else:
+            target_dir_x, target_dir_y = w_dir_x, w_dir_y
+
+        delta_deg = math.degrees(math.atan2(target_dir_y, target_dir_x) - math.atan2(offset_y, offset_x))
+        return (delta_deg + 180) % 360 - 180
+
+    def _get_edge_alignment_delta(self, obj):
+        """Calculates rotation delta to align part with the nearest sheet edge."""
+        edge_delta_deg, edge_weight = 0.0, 0.0
+        dragged_sheet = self._drag_active_sheet or self.obj_to_sheet.get(obj)
+        if not dragged_sheet: return 0.0, 0.0
+        
+        boundary = next((c for c in dragged_sheet.Group if c.Label.startswith("Sheet_Boundary_")), None)
+        if not boundary or not hasattr(boundary, "Shape"): return 0.0, 0.0
+        
+        sheet_bb, part_bb = boundary.Shape.BoundBox, self._get_shape_bbox(obj)
+        if not part_bb: return 0.0, 0.0
+        
+        cx, cy = (part_bb.XMin + part_bb.XMax) / 2.0, (part_bb.YMin + part_bb.YMax) / 2.0
+        min_edge_dist = min(cx - sheet_bb.XMin, sheet_bb.XMax - cx, cy - sheet_bb.YMin, sheet_bb.YMax - cy)
+        radius = self.physics_engine.radius
+        
+        if radius > 0.0 and min_edge_dist < radius:
+            edge_weight = max(0.0, 1.0 - min_edge_dist / radius)
+            near_vertical = (min_edge_dist == cx - sheet_bb.XMin or min_edge_dist == sheet_bb.XMax - cx)
+            local_dims = self._get_local_bbox_dims(obj)
+            if local_dims:
+                local_w, local_h = local_dims
+                long_axis_is_x = local_w >= local_h
+                x_axis = obj.Placement.Rotation.multVec(FreeCAD.Vector(1, 0, 0))
+                current_rot_deg = math.degrees(math.atan2(x_axis.y, x_axis.x))
+                target_rot_deg = (90.0 if long_axis_is_x else 0.0) if near_vertical else (0.0 if long_axis_is_x else 90.0)
+                raw = target_rot_deg - current_rot_deg
+                edge_delta_deg = (raw + 90) % 180 - 90
+        return edge_delta_deg, edge_weight
 
     def _apply_physics(self, drag_delta):
         """Push nearby parts based on proximity to the dragged part."""

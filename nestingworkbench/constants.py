@@ -30,3 +30,11 @@ PROP_USE_GPU = "UseGPU"
 
 # -- FreeCAD Preferences Path --
 PREFS_PATH = "User parameter:BaseApp/Preferences/NestingWorkbench"
+
+# -- Algorithm Presets --
+# Rotation angle presets (degrees). Index 0 = coarsest, last = finest.
+PHYSICS_ROTATION_PRESETS = [360, 90, 45, 30, 15, 10, 5, 2, 1]
+MINKOWSKI_ROTATION_PRESETS = [360, 180, 120, 90, 45, 30, 15, 10, 5, 1]
+
+# Alias for backward compatibility
+ROTATION_ANGLE_PRESETS = PHYSICS_ROTATION_PRESETS

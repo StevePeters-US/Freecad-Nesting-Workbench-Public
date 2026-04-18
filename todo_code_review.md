@@ -23,14 +23,14 @@ Phase 2 (Reliability — each independent):
   CR-121 [x] Log early return in NestingJob._persist_metadata()
 
 Phase 3 (Code quality — each independent unless noted):
-  CR-108a  Split GACoordinator.run() into helpers
-  CR-108b  Split NestingController.load_layout()
-  CR-108c  Split _handle_new_master() in shape_preparer
-  CR-108d  Split _auto_rotate() in manual_nester_tool
-  CR-109  Centralise rotation-angle arrays in constants.py
-  CR-113  Narrow exception in CollisionResolver._transform_bbox()
-  CR-116  Replace hasattr+getattr pattern with getattr(..., None)
-  CR-118  Convert nesting_logic viz_manager from global to parameter
+  CR-108a [x] Split GACoordinator.run() into helpers
+  CR-108b [x] Split NestingController.load_layout()
+  CR-108c [x] Split _handle_new_master() in shape_preparer
+  CR-108d [x] Split _auto_rotate() in manual_nester_tool
+  CR-109  [x] Centralise rotation-angle arrays in constants.py
+  CR-113  [x] Narrow exception in CollisionResolver._transform_bbox()
+  CR-116  [x] Replace hasattr+getattr pattern with getattr(..., None)
+  CR-118  [x] Convert nesting_logic viz_manager from global to parameter
 ```
 
 ---
@@ -566,3 +566,10 @@ makes the module harder to test in isolation.
 - [x] **CR-105**: Fix algorithm dropdown / settings group visibility mismatch (**2026-04-18**)
 - [x] **CR-107**: Fix double-counted X offset in `_add_new_sheet()` (**2026-04-18**)
 - [x] **CR-102**: Remove dead Coin3D scene-graph line in `manual_nester_tool.py` (**2026-04-18**)
+- [x] **CR-103**: Add logging to all silent except blocks (**2026-04-18**)
+- [x] **CR-104**: Log skipped rows in _collect_job_parameters() (**2026-04-18**)
+- [x] **CR-106**: Remove redundant set_default_font() or fix its path (**2026-04-18**)
+- [x] **CR-115**: Add visited-set cycle guard in get_draggable_parent() (**2026-04-18**)
+- [x] **CR-120**: Route traceback to FreeCAD.Console in ga_coordinator (**2026-04-18**)
+- [x] **CR-121**: Log early return in NestingJob._persist_metadata() (**2026-04-18**)
+- [x] **Phase 3**: Refactoring & Method Extraction (CR-108a-d, CR-109, CR-113, CR-116, CR-118) (**2026-04-18**)

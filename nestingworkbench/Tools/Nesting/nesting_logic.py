@@ -20,11 +20,11 @@ try:
 except ImportError:
     SHAPELY_AVAILABLE = False
 
-# Global manager for visualization state
-viz_manager = VisualizationManager()
+# Global manager removed to improve testability and thread safety (CR-118)
 
-def _visualize_trial_placement(part, angle, x, y):
+def _visualize_trial_placement(part, angle, x, y, viz_manager):
     """Draws the boundary polygon at a trial position during simulation."""
+    if not viz_manager: return
     doc = FreeCAD.ActiveDocument
     if not doc or not FreeCAD.GuiUp:
         return
@@ -46,8 +46,9 @@ def _visualize_trial_placement(part, angle, x, y):
     except Exception as e:
         FreeCAD.Console.PrintWarning(f"[nesting_logic] Draw failed: {e}\n")
 
-def _cleanup_trial_viz():
+def _cleanup_trial_viz(viz_manager):
     """Removes the trial visualization object and simulation sheet boundaries."""
+    if not viz_manager: return
     doc = FreeCAD.ActiveDocument
     viz_manager.clear_trial_placement(doc)
 
@@ -77,50 +78,33 @@ def _find_master_container_for_part(part):
             continue
     return None
 
-def _on_part_start(part):
-    """Called when starting to place a part - highlight the master shape's boundary if it's a new master."""
+def _on_part_start(part, viz_manager):
+    """Called when starting to place a part - highlight the master shape's boundary."""
+    if not viz_manager: return
     master_container = _find_master_container_for_part(part)
     if master_container:
         viz_manager.highlight_master(master_container)
 
-def _on_part_end(part, placed):
-    """Called after part is placed - we don't unhighlight here, we wait for a new master type."""
-    # Don't unhighlight here - keep it on until we switch to a different master
+def _on_part_end(part, placed, viz_manager):
+    """Called after part is placed."""
     pass
 
-def _cleanup_highlighting():
+def _cleanup_highlighting(viz_manager):
     """Called after nesting completes to ensure all highlighting is removed."""
-    viz_manager.clear_highlight()
+    if viz_manager:
+        viz_manager.clear_highlight()
 
 # --- Public Function ---
-def nest(parts, width, height, rotation_steps=1, simulate=False, algorithm='Minkowski', **kwargs):
+def nest(parts, width, height, rotation_steps=1, simulate=False, algorithm='Minkowski', viz_manager=None, **kwargs):
     """
     Convenience function to run the nesting algorithm.
-    
-    Args:
-        parts: List of Shape objects to nest
-        width: Sheet width
-        height: Sheet height
-        rotation_steps: Number of rotation steps
-        simulate: If True, shows simulation with callbacks
-        **kwargs: Additional arguments for the nester (including progress_callback)
     """
     from ...datatypes.shape import Shape
     
-    # Extract progress callback if present (not strictly needed as it goes into kwargs, but good for clarity)
-    # progress_callback = kwargs.get('progress_callback')
-    
-    # Only clear NFP cache if explicitly requested by the user (expensive to recompute)
     if kwargs.pop('clear_nfp_cache', False):
         Shape.clear_nfp_cache()
 
     sort = kwargs.pop('sort', True)
-    
-    # If simulation is enabled, the nester needs the original list of parts
-    # that are linked to the visible FreeCAD objects (fc_object).
-    # If simulation is disabled, we MUST use a deepcopy to prevent the nester
-    # from modifying the original part objects that the controller will use for
-    # the final drawing step.
     parts_to_process = parts if simulate else copy.deepcopy(parts)
 
     steps = 0
@@ -129,22 +113,22 @@ def nest(parts, width, height, rotation_steps=1, simulate=False, algorithm='Mink
 
     if not SHAPELY_AVAILABLE:
         show_shapely_installation_instructions()
-        raise NestingDependencyError("The selected algorithm requires the 'Shapely' library, which is not installed.")
+        raise NestingDependencyError("The selected algorithm requires the 'Shapely' library.")
 
-    # If simulation is enabled, add callbacks to kwargs
+    # If simulation is enabled, ensure we have a viz_manager and bind callbacks
     if simulate:
-        kwargs['trial_callback'] = _visualize_trial_placement
-        kwargs['part_start_callback'] = _on_part_start
-        kwargs['part_end_callback'] = _on_part_end
+        if viz_manager is None:
+            viz_manager = VisualizationManager()
+            
+        kwargs['trial_callback'] = lambda p, a, x, y: _visualize_trial_placement(p, a, x, y, viz_manager)
+        kwargs['part_start_callback'] = lambda p: _on_part_start(p, viz_manager)
+        kwargs['part_end_callback'] = lambda p, pl: _on_part_end(p, pl, viz_manager)
 
-    # The controller now passes a fresh list of all parts to be nested.
     if algorithm == 'Physics':
         nester = physics_nester.PhysicsNester(width, height, rotation_steps, **kwargs)
     else:
-        # Default to the existing Minkowski/Genetic strategy
         nester = nesting_strategy.Nester(width, height, rotation_steps, **kwargs)
 
-    # If simulation is enabled, pass a callback that can draw the sheet state.
     if simulate:
         nester.update_callback = lambda part, sheet: (sheet.draw(FreeCAD.ActiveDocument, {}, transient_part=part), FreeCADGui.updateGui())
 
@@ -153,19 +137,15 @@ def nest(parts, width, height, rotation_steps=1, simulate=False, algorithm='Mink
     result = nester.nest(parts_to_process, sort=sort)
     elapsed = time.monotonic() - start_time
     
-    # Cleanup trial visualization and highlighting
     if simulate:
-        _cleanup_trial_viz()
-        _cleanup_highlighting()
+        _cleanup_trial_viz(viz_manager)
+        _cleanup_highlighting(viz_manager)
     
-    # Some nesters may return a 3-tuple (sheets, unplaced, steps), while others
-    # may return a 2-tuple (sheets, unplaced). We handle both cases here.
     if len(result) == 3:
         sheets, unplaced, steps = result
     else:
         sheets, unplaced = result
 
-    # Calculate and display packing efficiency
     _calculate_efficiency(sheets, verbose=kwargs.get('verbose', False))
 
     return sheets, unplaced, steps, elapsed
