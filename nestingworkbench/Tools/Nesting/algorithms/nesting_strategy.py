@@ -97,28 +97,38 @@ class PlacementOptimizer:
             # CPU Parallel evaluation
             import time as _time
             t0_parallel = _time.perf_counter()
+            total_nfp_ms = 0.0
+            total_score_ms = 0.0
             with ThreadPoolExecutor() as executor:
                 angles = [i * (360.0 / part_rotation_steps) for i in range(part_rotation_steps)]
                 futures = {
-                    executor.submit(self._evaluate_rotation, angle, part, placed_parts_grouped, sheet, direction): angle 
+                    executor.submit(self._evaluate_rotation, angle, part, placed_parts_grouped, sheet, direction): angle
                     for angle in angles
                 }
-                
+
                 for future in as_completed(futures):
                     try:
                         res = future.result()
-                        if res and res['metric'] < best_result['metric']:
-                            best_result = res
-                            # Call trial callback from main thread for each better result found
-                            if self.trial_callback and best_result.get('x') is not None:
-                                self.trial_callback(part, best_result['angle'], best_result['x'], best_result['y'])
+                        if res:
+                            total_nfp_ms += res.get('_t_nfp_ms', 0)
+                            total_score_ms += res.get('_t_score_ms', 0)
+                            if res['metric'] < best_result['metric']:
+                                best_result = res
+                                # Call trial callback from main thread for each better result found
+                                if self.trial_callback and best_result.get('x') is not None:
+                                    self.trial_callback(part, best_result['angle'], best_result['x'], best_result['y'])
                     except Exception as e:
                         self.log(f"Error in rotation evaluation thread: {e}")
-            
-            dt_parallel = _time.perf_counter() - t0_parallel
+
+            dt_parallel = (_time.perf_counter() - t0_parallel) * 1000
+            self.log(f"[TIMING] '{getattr(part, 'id', '?')}': wall={dt_parallel:.0f}ms "
+                     f"nfp={total_nfp_ms:.0f}ms score={total_score_ms:.0f}ms "
+                     f"({len(angles)} rotations, {len(sheet.parts)} placed)")
             if self.verbose:
-                self.log(f"  -> Parallel eval: {len(angles)} rotations in {dt_parallel*1000:.1f}ms "
+                self.log(f"  -> Parallel eval: {len(angles)} rotations in {dt_parallel:.1f}ms "
                          f"(ideal speedup: {len(angles)}x, pool workers: {min(len(angles), os.cpu_count() or 1)})")
+            best_result['_t_nfp_ms'] = total_nfp_ms
+            best_result['_t_score_ms'] = total_score_ms
         
         if self.verbose:
             self.log(f"  -> Best result for {part.id}: {best_result}")
@@ -193,12 +203,14 @@ class PlacementOptimizer:
         # Notify better result found
         if self.trial_callback and best.get('x') is not None:
              self.trial_callback(part, angle, best['x'], best['y'])
-             
+
         t_end = _time.perf_counter()
         if self.verbose:
             self.log(f"    [{thread_id}] angle={angle:.0f}: NFP={((t_nfp-t0)*1000):.1f}ms, "
                      f"score={((t_end-t_nfp)*1000):.1f}ms, total={((t_end-t0)*1000):.1f}ms")
-             
+
+        best['_t_nfp_ms'] = (t_nfp - t0) * 1000
+        best['_t_score_ms'] = (t_end - t_nfp) * 1000
         return best
 
     def _get_candidates_for_rotation(self, angle, part, sheet, nfp_entry=None):
@@ -318,11 +330,13 @@ class Nester:
         current_parts = list(parts)
         if sort:
             current_parts.sort(key=lambda p: p.area, reverse=True)
-            
+
         sheets = []
         unplaced_parts = []
         total_parts = len(current_parts)
-        
+        _part_timings = []  # (part_id, elapsed_s, placed)
+        self.engine.reset_perf_stats()
+
         for i, part in enumerate(current_parts):
             if self.cancel_callback and self.cancel_callback():
                 self.log("Nesting cancelled by user.")
@@ -334,13 +348,15 @@ class Nester:
             if not quiet and self.progress_callback:
                 self.progress_callback(i + 1, total_parts, f"Placing {part.id}...")
             
+            import time as _time
+            _t0_part = _time.perf_counter()
             start_part_time = datetime.now()
             placed = False
-            
+
             # Notify start of part placement (for highlighting master shapes)
             if not quiet and self.part_start_callback:
                 self.part_start_callback(part)
-            
+
             # 1. Try existing sheets
             for sheet_idx, sheet in enumerate(sheets):
                 if (sheet.width * sheet.height - sheet.used_area) < part.area: continue
@@ -350,11 +366,11 @@ class Nester:
                     if self.verbose and not quiet:
                         elapsed = (datetime.now() - start_part_time).total_seconds()
                         self.log(f"  -> Placed on Sheet {sheet_idx+1} ({elapsed:.4f}s)")
-                    
-                    if not quiet and self.update_callback: 
+
+                    if not quiet and self.update_callback:
                         self.update_callback(part, sheet)
                     break
-            
+
             # 2. Try new sheet
             if not placed:
                 new_sheet = Sheet(len(sheets), self.bin_width, self.bin_height, spacing=self.spacing)
@@ -364,29 +380,50 @@ class Nester:
                     if self.verbose and not quiet:
                         elapsed = (datetime.now() - start_part_time).total_seconds()
                         self.log(f"  -> Placed on New Sheet {len(sheets)} ({elapsed:.4f}s)")
-                    
-                    if not quiet and self.update_callback: 
+
+                    if not quiet and self.update_callback:
                         self.update_callback(part, new_sheet)
                 else:
                     unplaced_parts.append(part)
                     if not quiet:
                         self.log(f"  -> FAILED to place in {(datetime.now() - start_part_time).total_seconds():.4f}s")
-            
+
+            _part_timings.append((part.id, _time.perf_counter() - _t0_part, placed))
+
             # Notify end of part placement (for unhighlighting master shapes)
             if not quiet and self.part_end_callback:
                 self.part_end_callback(part, placed)
-            
+
             # Submit background NFP pre-computation for remaining parts.
             # GPU mode: skip — precompute_nfp_batch() already handles this via a single
             # batched kernel call at the start of each find_best_placement. Background
             # per-pair tasks would compete for _kernel_lock and slow the foreground down.
             if placed and i < total_parts - 1 and not self.engine.use_gpu:
                 self._submit_precomputation(sheets, current_parts[i+1:])
-        
+
         # Shut down precompute pool (don't wait for pending futures)
         self._precompute_pool.shutdown(wait=False)
         self._precomputed_keys.clear()
+
+        if not quiet and _part_timings:
+            self._log_timing_summary(_part_timings)
+
         return sheets, unplaced_parts
+
+    def _log_timing_summary(self, part_timings):
+        total_s = sum(t for _, t, _ in part_timings)
+        cache = self.engine.get_perf_stats()
+        total_lookups = cache['cache_hits'] + cache['cache_misses']
+        hit_pct = cache['cache_hits'] / total_lookups * 100 if total_lookups else 0
+        self.log(
+            f"[TIMING] {len(part_timings)} parts in {total_s:.2f}s | "
+            f"NFP cache: {cache['cache_hits']} hits ({hit_pct:.0f}%) / "
+            f"{cache['cache_misses']} misses, compute={cache['nfp_compute_ms']:.0f}ms"
+        )
+        slowest = sorted(part_timings, key=lambda x: -x[1])[:5]
+        self.log("[TIMING] Slowest: " + ", ".join(
+            f"{pid}={t:.2f}s{'(unplaced)' if not ok else ''}" for pid, t, ok in slowest
+        ))
 
     def _attempt_placement_on_sheet(self, part, sheet):
         """Delegates to PlacementOptimizer."""

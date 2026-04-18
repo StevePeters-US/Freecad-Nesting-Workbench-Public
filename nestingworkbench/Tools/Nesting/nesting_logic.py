@@ -78,9 +78,11 @@ def _visualize_trial_placement(part, angle, x, y, viz_manager):
     try:
         # Get the boundary polygon from the part
         if hasattr(part, 'polygon') and part.polygon:
-            # Rotate and translate the polygon to the trial position
+            # Rotate and translate the polygon to the trial position.
+            # x,y is the target centroid position; translate by the delta from current centroid.
             rotated_poly = rotate(part.polygon, angle, origin='centroid')
-            translated_poly = translate(rotated_poly, xoff=x, yoff=y)
+            cx, cy = rotated_poly.centroid.x, rotated_poly.centroid.y
+            translated_poly = translate(rotated_poly, xoff=x - cx, yoff=y - cy)
             
             # Convert shapely polygon to FreeCAD wire
             coords = list(translated_poly.exterior.coords)

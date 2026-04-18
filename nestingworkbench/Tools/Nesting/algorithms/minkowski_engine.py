@@ -7,7 +7,6 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 from shapely.geometry import Polygon, Point, MultiPoint
 from shapely.affinity import translate, rotate
-from shapely.ops import unary_union
 from . import minkowski_utils
 try:
     from . import nfp_gpu_taichi
@@ -116,6 +115,8 @@ class MinkowskiEngine:
                 self.log("GPU acceleration requested but Taichi is not available or only has a CPU backend. Falling back to CPU.")
 
         self.bin_polygon = Polygon([(0, 0), (self.bin_width, 0), (self.bin_width, self.bin_height), (0, self.bin_height)])
+        self._perf_stats = {'cache_hits': 0, 'cache_misses': 0, 'nfp_compute_ms': 0.0}
+        self._perf_lock = Lock()
 
     def log(self, message):
         if self.log_callback:
@@ -162,19 +163,19 @@ class MinkowskiEngine:
 
             nfp_data = Shape.nfp_cache.get(nfp_cache_key)
 
-            # If batch-cached entry has holes=None (not computed) for a placed part that has
-            # interior rings, clear it and force recompute via _calculate_and_cache_nfp_gpu.
-            # CRITICAL: must remove from Shape.nfp_cache first — otherwise _calculate_and_cache_nfp_gpu
-            # finds the stale entry and returns it immediately, keeping holes=None forever.
-            # NOTE: holes=[] (empty list) means "computed but B doesn't fit" — do NOT invalidate.
+            # Safety net: Pass 2 IFP fill-in may have failed (e.g. exception in thread).
+            # Fill IFP on-demand rather than discarding the valid shells from Pass 1.
             if (nfp_data is not None
                     and self.use_gpu
                     and nfp_data.get('holes') is None
                     and p.shape.original_polygon
                     and list(p.shape.original_polygon.interiors)):
+                nfp_holes = self._compute_ifp_for_hole_shape(p.shape, part_to_place, relative_angle)
                 with Shape.nfp_cache_lock:
-                    Shape.nfp_cache.pop(nfp_cache_key, None)
-                nfp_data = None
+                    entry = Shape.nfp_cache.get(nfp_cache_key)
+                    if entry is not None and entry.get('holes') is None:
+                        entry['holes'] = nfp_holes
+                nfp_data = Shape.nfp_cache.get(nfp_cache_key)
 
             if not nfp_data:
                 n_misses += 1
@@ -189,6 +190,8 @@ class MinkowskiEngine:
                     )
                 dt_miss = (time.perf_counter() - t_miss) * 1000
                 self.log(f"[PERF] NFP cache MISS key={nfp_cache_key[:3]} angle={relative_angle:.1f} -> {dt_miss:.1f}ms")
+                with self._perf_lock:
+                    self._perf_stats['nfp_compute_ms'] += dt_miss
             else:
                 n_hits += 1
 
@@ -240,10 +243,12 @@ class MinkowskiEngine:
                     except Exception as e:
                         self.log(f"Visualization union failed (non-fatal): {e}")
                 else:
-                    # Fallback: discretize individual shells (needs Shapely for .length/.interpolate)
-                    for raw in raw_shells:
-                        r = rotate(raw, placed_angle, origin=(0, 0)) if abs(placed_angle) > 1e-9 else raw
-                        points.extend(self._discretize_edge(translate(r, xoff=cent.x, yoff=cent.y).exterior))
+                    # Extract vertices from pre-transformed batched shells — no Shapely needed.
+                    # Shell vertices are valid NFP boundary candidates; avoids per-shell
+                    # rotate/translate/discretize which is O(N_shells) Shapely ops.
+                    for shell in part_shells:
+                        coords = shell.exterior.coords  # numpy array, already in final position
+                        points.extend(Point(float(c[0]), float(c[1])) for c in coords[:-1])
 
                 # Add IFP void boundary edges as placement candidates (void nesting)
                 for piece in part_holes:
@@ -270,6 +275,9 @@ class MinkowskiEngine:
                     points.extend(self._discretize_edge(interior))
 
         dt_total = (time.perf_counter() - t0_total) * 1000
+        with self._perf_lock:
+            self._perf_stats['cache_hits'] += n_hits
+            self._perf_stats['cache_misses'] += n_misses
         if n_misses > 0 or dt_total > 10.0:
             self.log(f"[PERF] get_global_nfp_for angle={angle:.1f} "
                      f"hits={n_hits} misses={n_misses} "
@@ -322,8 +330,11 @@ class MinkowskiEngine:
         if not result.is_valid:
             result = result.buffer(0)
         # Outward buffer compensates for inscribed-polygon approximation error.
-        # Magnitude: half the max chord-to-arc sag, approximated as step_size/2.
-        result = result.buffer(self.step_size * 0.5)
+        # Use join_style=2 (mitre) to prevent Shapely's default round-corner arc
+        # discretisation from inflating the vertex count (e.g. 16 verts → 77).
+        # Mitre join adds zero extra vertices per convex corner, keeping the
+        # polygon at ≤_DECOMP_MAX_VERTS so triangulation stays O(N) not O(N²).
+        result = result.buffer(self.step_size * 0.5, join_style=2, mitre_limit=5.0)
         return result
 
     def _get_decomposition(self, shape):
@@ -353,20 +364,23 @@ class MinkowskiEngine:
         return parts
 
     def precompute_nfp_batch(self, part_to_place, angles, sheet):
-        """Pre-calculates all missing pairwise NFPs for a set of angles on the GPU."""
+        """Pre-calculates all missing pairwise NFPs for a set of angles on the GPU.
+
+        Two-pass approach for shapes with holes:
+          Pass 1 (GPU): Exterior shells computed for ALL placed parts including holes.
+                        Union is skipped for hole-shapes (visualization-only, expensive).
+                        Stores entries with holes=None sentinel.
+          Pass 2 (IFP): Fills in IFP for hole-shape entries via Shapely ThreadPoolExecutor.
+                        Updates cache entries in-place; no full recompute.
+        """
         if not self.use_gpu or not nfp_gpu_taichi:
             return
 
         missing_pairs = []
         part_to_place_label = part_to_place.source_freecad_object.Label
-        
+
         for angle in angles:
             for p in sheet.parts:
-                # Skip placed parts with holes — batch path can't compute IFP.
-                # get_global_nfp_for will compute them on-demand via _calculate_and_cache_nfp_gpu.
-                if p.shape.original_polygon and list(p.shape.original_polygon.interiors):
-                    continue
-
                 placed_label = p.shape.source_freecad_object.Label
                 placed_angle = p.angle
                 relative_angle = (angle - placed_angle) % 360.0
@@ -379,96 +393,145 @@ class MinkowskiEngine:
                 )
 
                 if nfp_cache_key not in Shape.nfp_cache:
-                    missing_pairs.append({'shape_A': p.shape, 'angle_B': relative_angle, 'key': nfp_cache_key})
-        
+                    has_holes = bool(p.shape.original_polygon and list(p.shape.original_polygon.interiors))
+                    missing_pairs.append({
+                        'shape_A': p.shape,
+                        'angle_B': relative_angle,
+                        'key': nfp_cache_key,
+                        'has_holes': has_holes,
+                    })
+
         self.log(f"[PERF] precompute_nfp_batch: {len(missing_pairs)} missing pairs "
                  f"({len(angles)} angles × {len(sheet.parts)} placed parts)")
         if not missing_pairs:
             return
 
         t0_batch = time.perf_counter()
+        hole_fill_pairs = []  # Collected during Pass 1, processed in Pass 2
+
         try:
             poly_b_parts = self._get_decomposition(part_to_place)
             from shapely.affinity import scale
             parts_b_reflected = [scale(p, xfact=-1.0, yfact=-1.0, origin=(0,0)) for p in poly_b_parts]
-            
-            # Group missing pairs by shape_A to use compute_nfp_batch effectively
+
+            # Group missing pairs by shape_A label
             grouped_by_A = {}
             for m_pair in missing_pairs:
                 shape_id = m_pair['shape_A'].source_freecad_object.Label
                 if shape_id not in grouped_by_A:
                     grouped_by_A[shape_id] = {'shape': m_pair['shape_A'], 'missing': []}
                 grouped_by_A[shape_id]['missing'].append(m_pair)
-            
+
+            # --- Pass 1: GPU batch (exterior shells for all placed parts) ---
             for shape_id, group in grouped_by_A.items():
                 shape_A = group['shape']
                 poly_A_parts = self._get_decomposition(shape_A)
-                
-                # Unique angles for this A
                 m_pairs = group['missing']
                 angles_deg = sorted(list(set(p['angle_B'] for p in m_pairs)))
-                
+                has_holes = m_pairs[0]['has_holes']  # Same for all pairs of this shape_A
+
                 if self.verbose:
                     self.log(f"GPU batch: {len(poly_A_parts)}x{len(parts_b_reflected)} pairs, {len(angles_deg)} angles")
-                
-                # GPU-006: Timing
+
                 t0 = time.perf_counter()
-                
-                # GPU-004: Compute all NFPs for this A-B pair across all angles
                 results_per_rotation = nfp_gpu_taichi.compute_nfp_batch(
                     poly_A_parts, parts_b_reflected, angles_deg
                 )
-                
                 dt_gpu = (time.perf_counter() - t0) * 1000
                 if self.verbose:
                     self.log(f"GPU batch compute: {dt_gpu:.1f}ms")
-                
-                t_union = 0
-                # Map results back to cache keys
+
                 angle_to_results = dict(zip(angles_deg, results_per_rotation))
-                
+
                 for m_pair in m_pairs:
                     angle = m_pair['angle_B']
                     cache_key = m_pair['key']
                     hulls = angle_to_results.get(angle, [])
-                    
-                    if hulls:
-                        try:
-                            t_u0 = time.perf_counter()
-                            # GPU-003: GPU Union (conservative approximation)
-                            union_poly = nfp_gpu_taichi.union_convex_hulls_gpu(hulls)
-                            if union_poly is None:
-                                # Fallback to CPU
-                                if self.verbose:
-                                    FreeCAD.Console.PrintLog("[MinkowskiEngine] GPU batch union fallback to CPU\n")
-                                # NFP-010: Buffer hulls to avoid TopologyException
-                                union_poly = unary_union([h.buffer(1e-7) for h in hulls])
-                            
-                            t_union += (time.perf_counter() - t_u0) * 1000
 
-                            if not union_poly.is_valid:
-                                union_poly = union_poly.buffer(0)
-                            
-                            nfp_data = {
-                                'shells': hulls,
-                                'shells_batch': _make_shells_batch(hulls),
-                                'holes': None,  # None = IFP not yet computed ([] = computed/empty)
-                                'polygon': union_poly,
-                                'points': [],
-                                'error': None
-                            }
-                            with Shape.nfp_cache_lock:
-                                if cache_key not in Shape.nfp_cache:
-                                    Shape.nfp_cache[cache_key] = nfp_data
-                        except Exception as pair_err:
-                            self.log(f"Skipping pair {cache_key}: {pair_err}")
-                                
-                if self.verbose and t_union > 0:
-                    self.log(f"GPU batch union total: {t_union:.1f}ms")
+                    if not hulls:
+                        continue
+                    try:
+                        nfp_data = {
+                            'shells': hulls,
+                            'shells_batch': _make_shells_batch(hulls),
+                            # holes=None: IFP pending Pass 2.  holes=[]: not applicable / empty.
+                            'holes': None if has_holes else [],
+                            'polygon': None,
+                            'points': [],
+                            'error': None
+                        }
+                        with Shape.nfp_cache_lock:
+                            if cache_key not in Shape.nfp_cache:
+                                Shape.nfp_cache[cache_key] = nfp_data
+
+                        if has_holes:
+                            hole_fill_pairs.append((shape_A, angle, part_to_place, cache_key))
+                    except Exception as pair_err:
+                        self.log(f"Skipping pair {cache_key}: {pair_err}")
+
+            # --- Pass 2: IFP fill-in for hole-shape entries ---
+            if hole_fill_pairs:
+                self._fill_ifp_pass(hole_fill_pairs)
+
         except Exception as e:
             self.log(f"Batch NFP precompute error: {e}")
         dt_batch = (time.perf_counter() - t0_batch) * 1000
         self.log(f"[PERF] precompute_nfp_batch total: {dt_batch:.1f}ms")
+
+    def _fill_ifp_pass(self, hole_fill_pairs):
+        """Pass 2: compute IFPs for hole-shape cache entries and update in-place.
+
+        Args:
+            hole_fill_pairs: list of (shape_A, angle_B, part_to_place, cache_key)
+        """
+        t0 = time.perf_counter()
+
+        def _compute_one(args):
+            shape_A, angle_B, part_to_place, cache_key = args
+            try:
+                nfp_holes = self._compute_ifp_for_hole_shape(shape_A, part_to_place, angle_B)
+            except Exception as e:
+                self.log(f"IFP fill error for {cache_key}: {e}")
+                nfp_holes = []
+            with Shape.nfp_cache_lock:
+                entry = Shape.nfp_cache.get(cache_key)
+                if entry is not None and entry.get('holes') is None:
+                    entry['holes'] = nfp_holes
+
+        n_workers = min(4, len(hole_fill_pairs))
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            list(executor.map(_compute_one, hole_fill_pairs))
+
+        dt = (time.perf_counter() - t0) * 1000
+        self.log(f"[PERF] IFP fill-in: {len(hole_fill_pairs)} pairs in {dt:.1f}ms")
+
+    def _compute_ifp_for_hole_shape(self, shape_A, part_to_place, angle_B):
+        """Compute IFP convex parts for a placed shape with interior rings (holes).
+
+        Pure Shapely — no GPU. Safe to call from a thread pool.
+
+        Returns:
+            list[Polygon]: convex decomposition of all IFPs, or [] if part doesn't fit.
+        """
+        nfp_holes = []
+        mB = part_to_place.original_polygon
+        cB = mB.centroid
+        B_centered = translate(mB, -cB.x, -cB.y)
+        B_rot = rotate(B_centered, angle_B, origin=(0, 0))
+        mA = shape_A.original_polygon
+        cA = mA.centroid
+        A_centered = translate(mA, -cA.x, -cA.y)
+        for hole in A_centered.interiors:
+            hole_poly = Polygon(hole.coords)
+            if (B_rot.bounds[2] - B_rot.bounds[0] < hole_poly.bounds[2] - hole_poly.bounds[0] and
+                    B_rot.bounds[3] - B_rot.bounds[1] < hole_poly.bounds[3] - hole_poly.bounds[1] and
+                    B_rot.area < hole_poly.area):
+                ifp = minkowski_utils.calculate_inner_fit_polygon(
+                    hole_poly, 0, B_centered, angle_B, self.log
+                )
+                if ifp and not ifp.is_empty:
+                    nfp_holes.extend(minkowski_utils.decompose_if_needed(ifp, self.log))
+        return nfp_holes
 
     def score_candidates_gpu(self, part_to_place, rotation_candidates):
         """Calculates scores for multiple candidates using GPU PIP scoring.
@@ -614,45 +677,14 @@ class MinkowskiEngine:
             
             # GPU-007: No-Union data structure
             nfp_shells = valid_hulls
-            nfp_holes = []
+            nfp_holes = (self._compute_ifp_for_hole_shape(shape_A, part_to_place, angle_B)
+                         if shape_A.original_polygon.interiors else [])
             
-            # Calculate IFP for holes (if any)
-            if shape_A.original_polygon.interiors:
-                mB = part_to_place.original_polygon
-                cB = mB.centroid
-                B_centered = translate(mB, -cB.x, -cB.y)
-                B_rot = rotate(B_centered, angle_B, origin=(0,0))
-                mA = shape_A.original_polygon
-                cA = mA.centroid
-                A_centered = translate(mA, -cA.x, -cA.y)
-                for hole in A_centered.interiors:
-                    hole_poly = Polygon(hole.coords)
-                    # Check if B can even fit in this hole's bounding box
-                    if (B_rot.bounds[2] - B_rot.bounds[0] < hole_poly.bounds[2] - hole_poly.bounds[0] and
-                        B_rot.bounds[3] - B_rot.bounds[1] < hole_poly.bounds[3] - hole_poly.bounds[1] and
-                        B_rot.area < hole_poly.area):
-                        ifp = minkowski_utils.calculate_inner_fit_polygon(hole_poly, 0, B_centered, angle_B, self.log)
-                        if ifp and not ifp.is_empty:
-                            # Decompose IFP into convex pieces for GPU PIP
-                            hole_decomposed = minkowski_utils.decompose_if_needed(ifp, self.log)
-                            nfp_holes.extend(hole_decomposed)
-            
-            # Best-effort union for visualization ONLY
-            master_nfp = None
-            try:
-                # Use a small buffer to avoid GEOS topology errors
-                hulls_buffered = [h.buffer(1e-7) for h in valid_hulls]
-                nfp_exterior_poly = unary_union(hulls_buffered)
-                if nfp_exterior_poly and not nfp_exterior_poly.is_empty:
-                    master_nfp = nfp_exterior_poly
-            except Exception as e:
-                self.log(f"Visualization union failed (non-fatal): {e}")
-                
             nfp_data = {
                 "shells": nfp_shells,
                 "shells_batch": _make_shells_batch(nfp_shells),
                 "holes": nfp_holes,
-                "polygon": master_nfp
+                "polygon": None
             }
         except Exception as e:
             self.log(f"GPU NFP Error for {cache_key}: {e}. Falling back to CPU.")
@@ -660,6 +692,14 @@ class MinkowskiEngine:
         
         with Shape.nfp_cache_lock: Shape.nfp_cache[cache_key] = nfp_data
         return nfp_data
+
+    def get_perf_stats(self):
+        with self._perf_lock:
+            return dict(self._perf_stats)
+
+    def reset_perf_stats(self):
+        with self._perf_lock:
+            self._perf_stats = {'cache_hits': 0, 'cache_misses': 0, 'nfp_compute_ms': 0.0}
 
     def _discretize_edge(self, line):
         points = [Point(line.coords[0])]
