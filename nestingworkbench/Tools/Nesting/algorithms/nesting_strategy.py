@@ -285,15 +285,21 @@ class Nester:
     def nest(self, parts, sort=True):
         """
         Main entry point for nesting.
-        
+
         NOTE: GA optimization is now handled at the controller level using LayoutManager.
         This method just runs standard greedy nesting.
         """
-        # Cleanup debug objects
-        doc = FreeCAD.ActiveDocument
-        if doc and doc.getObject("MinkowskiDebug"):
-            doc.removeObject("MinkowskiDebug")
-            doc.recompute()
+        # Cleanup debug objects — only safe from the main thread
+        try:
+            from PySide.QtCore import QThread, QCoreApplication
+            app = QCoreApplication.instance()
+            if app and QThread.currentThread() == app.thread():
+                doc = FreeCAD.ActiveDocument
+                if doc and doc.getObject("MinkowskiDebug"):
+                    doc.removeObject("MinkowskiDebug")
+                    doc.recompute()
+        except Exception:
+            pass
 
         return self._nest_standard(parts, sort=sort)
 

@@ -205,11 +205,10 @@ class GACoordinator:
                                 self.layout_manager.delete_layout(layout, verbose=verbose)
                     layouts = [best_layout]
             
-            # STEP 4: Finalize result
-            job = self._finalize(best_layout, best_efficiency, total_nesting_time, target_layout, ui_params)
-            self.doc.recompute()
+            # STEP 4: Finalize result — dispatch to main thread (ViewObject + recompute)
+            job = self._dispatch_finalize(best_layout, best_efficiency, total_nesting_time, target_layout, ui_params)
             return job
-            
+
         except Exception as e:
             import traceback
             FreeCAD.Console.PrintError(f"GA Nesting Error: {e}\n{traceback.format_exc()}\n")
@@ -217,10 +216,36 @@ class GACoordinator:
             if 'layouts' in locals():
                 for layout in layouts:
                     self.layout_manager.delete_layout(layout)
-            self.doc.recompute()
+            self._dispatch_recompute()
             return None
 
-    def _run_generation(self, layouts, gen, generations, ui_params, rotation_steps, algo_kwargs, 
+    def _dispatch_finalize(self, best_layout, best_efficiency, total_time, target_layout, ui_params):
+        """Runs _finalize() and doc.recompute() on the main thread if using a worker."""
+        if self.draw_callback:
+            result_holder = [None]
+            self.draw_callback({
+                'ga_finalize': True,
+                'best_layout': best_layout,
+                'best_efficiency': best_efficiency,
+                'total_time': total_time,
+                'target_layout': target_layout,
+                'ui_params': ui_params,
+                'result_holder': result_holder,
+            })
+            return result_holder[0]
+        else:
+            job = self._finalize(best_layout, best_efficiency, total_time, target_layout, ui_params)
+            self.doc.recompute()
+            return job
+
+    def _dispatch_recompute(self):
+        """Runs doc.recompute() on the main thread if using a worker."""
+        if self.draw_callback:
+            self.draw_callback({'doc_recompute_only': True})
+        else:
+            self.doc.recompute()
+
+    def _run_generation(self, layouts, gen, generations, ui_params, rotation_steps, algo_kwargs,
                         is_simulating, cancel_callback, verbose, viz_manager=None):
         """Nests each layout in the population and calculates fitness/efficiency."""
         from .nesting_logic import nest
@@ -239,6 +264,11 @@ class GACoordinator:
             
             # Run nesting
             current_kwargs = algo_kwargs.copy()
+            if self.draw_callback:
+                # Route through thread-safe signal instead of direct Qt widget calls
+                if 'progress_callback' in current_kwargs:
+                    current_kwargs['progress_callback'] = self._update_progress
+                current_kwargs.pop('log_callback', None)
             if len(layouts) > 1 or generations > 1:
                  current_kwargs['quiet'] = True
                  if 'progress_callback' in current_kwargs: del current_kwargs['progress_callback']

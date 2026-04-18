@@ -8,18 +8,50 @@ from .algorithms import nesting_strategy
 from .algorithms import physics_nester
 from .visualization_manager import VisualizationManager
 
+
+class _MainThreadRelay(QtCore.QObject):
+    """QObject that lives on the main thread.
+    Signals emitted from worker threads are queued and execute on the main thread.
+    """
+    _fn_signal = QtCore.Signal(object)
+
+    def __init__(self):
+        super().__init__()
+        # QueuedConnection guarantees the slot runs on this object's (main) thread
+        self._fn_signal.connect(self._run, QtCore.Qt.QueuedConnection)
+
+    def _run(self, fn):
+        try:
+            fn()
+        except Exception as e:
+            FreeCAD.Console.PrintWarning(f"[MainThreadRelay] Callback error: {e}\n")
+
+    def post(self, fn):
+        """Post callable to be executed on the main thread."""
+        self._fn_signal.emit(fn)
+
+
+# Created once at module load time (always the main thread)
+_main_thread_relay = _MainThreadRelay()
+
+
 def _main_thread_wrapper(fn):
-    """Wraps a callback so it always executes on the main thread."""
+    """Wraps a callback so it always executes on the main thread.
+
+    Uses a relay QObject signal (QueuedConnection) so the callable is
+    correctly posted to the main thread's event loop regardless of which
+    thread calls the wrapper.
+    """
     def wrapper(*args, **kwargs):
         app = QtGui.QApplication.instance()
         if not app:
             fn(*args, **kwargs)
             return
-            
+
         if QtCore.QThread.currentThread() == app.thread():
             fn(*args, **kwargs)
         else:
-            QtCore.QTimer.singleShot(0, lambda: fn(*args, **kwargs))
+            _main_thread_relay.post(lambda: fn(*args, **kwargs))
     return wrapper
 
 class NestingDependencyError(Exception):
@@ -158,8 +190,9 @@ def nest(parts, width, height, rotation_steps=1, simulate=False, algorithm='Mink
     elapsed = time.monotonic() - start_time
     
     if simulate:
-        _cleanup_trial_viz(viz_manager)
-        _cleanup_highlighting(viz_manager)
+        # These access FreeCAD doc objects and ViewObject — must run on main thread
+        _main_thread_wrapper(lambda: _cleanup_trial_viz(viz_manager))()
+        _main_thread_wrapper(lambda: _cleanup_highlighting(viz_manager))()
     
     if len(result) == 3:
         sheets, unplaced, steps = result

@@ -162,7 +162,7 @@ class NestingWorker(QThread):
 
 ### N-002: Refactor GACoordinator to accept draw callback
 
-- [ ] **File**: `nestingworkbench/Tools/Nesting/ga_coordinator.py` (MODIFY)
+- [x] **File**: `nestingworkbench/Tools/Nesting/ga_coordinator.py` (MODIFY)
 - **What**: Add a `draw_callback` parameter to `__init__` and `_run_generation` so drawing can be deferred to the main thread. When no callback is provided, draw inline (backwards compatible).
 - **Depends on**: N-001
 - **Skill**: `nw_threading`, `nw_nesting_pipeline`
@@ -214,7 +214,7 @@ else:
 
 ### N-003: Refactor GACoordinator UI callbacks for thread safety
 
-- [ ] **File**: `nestingworkbench/Tools/Nesting/ga_coordinator.py` (MODIFY)
+- [x] **File**: `nestingworkbench/Tools/Nesting/ga_coordinator.py` (MODIFY)
 - **What**: Replace direct UI callback invocations (`_set_status`, `_update_progress`) with signal emissions when running in threaded mode. The `NestingWorker` signals handle cross-thread delivery.
 - **Depends on**: N-001, N-002
 - **Skill**: `nw_threading`
@@ -257,7 +257,7 @@ def _update_progress(self, current, total, msg=None):
 
 ### N-004: Refactor GACoordinator population creation for thread safety
 
-- [ ] **File**: `nestingworkbench/Tools/Nesting/ga_coordinator.py` (MODIFY)
+- [x] **File**: `nestingworkbench/Tools/Nesting/ga_coordinator.py` (MODIFY)
 - **What**: Population creation (`create_ga_population` at line 90) and next-generation building (`_build_next_generation` at line 231) create/delete FreeCAD document objects. Marshal these to the main thread via the draw_callback when running threaded.
 - **Depends on**: N-002
 - **Skill**: `nw_threading`, `nw_freecad_patterns`
@@ -292,7 +292,7 @@ else:
 
 ### N-005: Wire NestingWorker into NestingController
 
-- [ ] **File**: `nestingworkbench/Tools/Nesting/nesting_controller.py` (MODIFY)
+- [x] **File**: `nestingworkbench/Tools/Nesting/nesting_controller.py` (MODIFY)
 - **What**: Refactor `_execute_ga_nesting()` to create and start `NestingWorker` instead of running synchronously. Add signal handler slots for draw, status, progress, completion, and error. Move cleanup logic from `run()`'s `finally` block to signal handlers.
 - **Depends on**: N-001, N-002, N-003, N-004
 - **Skill**: `nw_threading`, `nw_nesting_pipeline`
@@ -460,7 +460,7 @@ if simulate:
 
 ### N-007: Handle cancellation with active worker thread
 
-- [ ] **File**: `nestingworkbench/Tools/Nesting/nesting_controller.py` (MODIFY)
+- [x] **File**: `nestingworkbench/Tools/Nesting/nesting_controller.py` (MODIFY)
 - **What**: Update `request_cancel()` and `cancel_job()` to handle the case where a `NestingWorker` thread is active. The cancel flag is already thread-safe (GIL guarantees atomic bool read), but we need to wait for the worker to actually stop before cleaning up.
 - **Depends on**: N-005
 - **Skill**: `nw_threading`

@@ -776,13 +776,24 @@ class NestingController:
             elif payload.get('sheets'):
                 for sheet in payload['sheets']:
                     sheet.draw(payload['doc'], payload['ui_params'], payload['layout_group'],
-                              parts_to_place_group=payload['parts_group'], 
+                              parts_to_place_group=payload['parts_group'],
                               verbose=payload.get('verbose', False))
                 if payload.get('hide_layout'):
                     lg = payload['layout_group']
                     if lg and hasattr(lg, "ViewObject"):
                         lg.ViewObject.Visibility = False
                 FreeCADGui.updateGui()
+            elif payload.get('ga_finalize'):
+                # _finalize() and doc.recompute() must run on main thread (ViewObject + recompute)
+                coordinator = self._worker.coordinator
+                job = coordinator._finalize(
+                    payload['best_layout'], payload['best_efficiency'],
+                    payload['total_time'], payload['target_layout'], payload['ui_params']
+                )
+                payload['result_holder'][0] = job
+                coordinator.doc.recompute()
+            elif payload.get('doc_recompute_only'):
+                self._worker.coordinator.doc.recompute()
         finally:
             self._worker.notify_draw_complete()
 
