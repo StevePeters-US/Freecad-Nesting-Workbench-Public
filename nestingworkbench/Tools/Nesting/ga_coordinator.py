@@ -13,7 +13,7 @@ from .algorithms import genetic_utils
 class GACoordinator:
     """Runs the GA optimization loop and returns the best Layout."""
 
-    def __init__(self, doc, shape_preparer, ui_callbacks=None):
+    def __init__(self, doc, shape_preparer, ui_callbacks=None, draw_callback=None, worker=None):
         """
         Args:
             doc: FreeCAD.ActiveDocument
@@ -23,13 +23,21 @@ class GACoordinator:
                 'update_progress': callable(current, total, msg) — update progress bar
                 'reset_progress': callable() — reset progress bar
                 'play_sound': callable() — beep on completion
+            draw_callback: callable(payload_dict) — marshal to main thread
+            worker: NestingWorker instance — for signal emission
         """
         self.doc = doc
         self.shape_preparer = shape_preparer
         self.ui_callbacks = ui_callbacks or {}
+        self.draw_callback = draw_callback
+        self.worker = worker
         self.layout_manager = None
+        self._pending_layouts = None
 
     def _set_status(self, msg):
+        if self.worker:
+            self.worker.status_changed.emit(msg)
+            return
         callback = self.ui_callbacks.get('set_status')
         if callback:
             try:
@@ -38,6 +46,9 @@ class GACoordinator:
                 pass
 
     def _update_progress(self, current, total, msg=None):
+        if self.worker:
+            self.worker.progress_updated.emit(current, total, msg or "")
+            return
         callback = self.ui_callbacks.get('update_progress')
         if callback:
             try:
@@ -85,11 +96,28 @@ class GACoordinator:
         self.layout_manager = LayoutManager(self.doc, self.shape_preparer.processed_shape_cache)
         
         self._set_status(f"Creating {population_size} layouts...")
-        FreeCADGui.updateGui()
+        if self.draw_callback:
+            self.draw_callback({'updateGui_only': True})
+        else:
+            FreeCADGui.updateGui()
         
-        layouts = self.layout_manager.create_ga_population(
-            master_map, quantities, ui_params, population_size, rotation_steps, verbose=verbose
-        )
+        if self.draw_callback:
+            # Marshal to main thread
+            create_payload = {
+                'create_population': True,
+                'master_map': master_map,
+                'quantities': quantities, 
+                'ui_params': ui_params,
+                'population_size': population_size,
+                'rotation_steps': rotation_steps,
+                'verbose': verbose,
+            }
+            self.draw_callback(create_payload)
+            layouts = self._pending_layouts
+        else:
+            layouts = self.layout_manager.create_ga_population(
+                master_map, quantities, ui_params, population_size, rotation_steps, verbose=verbose
+            )
         
         best_layout = None
         best_efficiency = 0
@@ -105,7 +133,10 @@ class GACoordinator:
                 if verbose:
                     FreeCAD.Console.PrintMessage(f"\n=== Generation {gen+1}/{generations} ===\n")
                 self._set_status(f"Generation {gen+1}/{generations}...")
-                FreeCADGui.updateGui()
+                if self.draw_callback:
+                    self.draw_callback({'updateGui_only': True})
+                else:
+                    FreeCADGui.updateGui()
                 
                 gen_time, interrupted = self._run_generation(
                     layouts, gen, generations, ui_params, rotation_steps, 
@@ -137,15 +168,41 @@ class GACoordinator:
                 if gen < generations - 1:
                     actual_elite = min(elite_count, len(layouts))
                     elites = layouts[:actual_elite]
-                    layouts = self._build_next_generation(
-                        gen, layouts, elites, master_map, quantities, ui_params, 
-                        rotation_steps, mutation_rate, immigrant_ratio, verbose
-                    )
+                    
+                    if self.draw_callback:
+                        next_gen_payload = {
+                            'build_next_generation': True,
+                            'gen': gen,
+                            'layouts': layouts,
+                            'elites': elites,
+                            'master_map': master_map,
+                            'quantities': quantities,
+                            'ui_params': ui_params,
+                            'rotation_steps': rotation_steps,
+                            'mutation_rate': mutation_rate,
+                            'immigrant_ratio': immigrant_ratio,
+                            'verbose': verbose
+                        }
+                        self.draw_callback(next_gen_payload)
+                        layouts = self._pending_layouts
+                    else:
+                        layouts = self._build_next_generation(
+                            gen, layouts, elites, master_map, quantities, ui_params, 
+                            rotation_steps, mutation_rate, immigrant_ratio, verbose
+                        )
                 else:
                     # Final cleanup
-                    for layout in layouts:
-                        if layout != best_layout:
-                            self.layout_manager.delete_layout(layout, verbose=verbose)
+                    if self.draw_callback:
+                         self.draw_callback({
+                             'cleanup_layouts': True,
+                             'layouts': layouts,
+                             'best_layout': best_layout,
+                             'verbose': verbose
+                         })
+                    else:
+                        for layout in layouts:
+                            if layout != best_layout:
+                                self.layout_manager.delete_layout(layout, verbose=verbose)
                     layouts = [best_layout]
             
             # STEP 4: Finalize result
@@ -218,13 +275,26 @@ class GACoordinator:
                 layout.fitness += len(unplaced) * ui_params['sheet_width'] * ui_params['sheet_height'] * 10
             
             # Draw
-            for sheet in sheets:
-                sheet.draw(self.doc, ui_params, layout.layout_group, 
-                           parts_to_place_group=layout.parts_group, verbose=verbose)
-            
-            if len(layouts) > 1 and layout.layout_group and hasattr(layout.layout_group, "ViewObject"):
-                layout.layout_group.ViewObject.Visibility = False
-            FreeCADGui.updateGui()
+            draw_payload = {
+                'sheets': sheets,
+                'doc': self.doc,
+                'ui_params': ui_params,
+                'layout_group': layout.layout_group,
+                'parts_group': layout.parts_group,
+                'verbose': verbose,
+                'hide_layout': len(layouts) > 1,
+            }
+
+            if self.draw_callback:
+                self.draw_callback(draw_payload)
+            else:
+                for sheet in sheets:
+                    sheet.draw(self.doc, ui_params, layout.layout_group, 
+                               parts_to_place_group=layout.parts_group, verbose=verbose)
+                
+                if len(layouts) > 1 and layout.layout_group and hasattr(layout.layout_group, "ViewObject"):
+                    layout.layout_group.ViewObject.Visibility = False
+                FreeCADGui.updateGui()
             
         return total_time, False
 

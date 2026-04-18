@@ -160,8 +160,7 @@ class MinkowskiEngine:
                 part_to_place.spacing, part_to_place.deflection, part_to_place.simplification
             )
 
-            with Shape.nfp_cache_lock:
-                nfp_data = Shape.nfp_cache.get(nfp_cache_key)
+            nfp_data = Shape.nfp_cache.get(nfp_cache_key)
 
             # If batch-cached entry has holes=None (not computed) for a placed part that has
             # interior rings, clear it and force recompute via _calculate_and_cache_nfp_gpu.
@@ -379,9 +378,8 @@ class MinkowskiEngine:
                     part_to_place.spacing, part_to_place.deflection, part_to_place.simplification
                 )
 
-                with Shape.nfp_cache_lock:
-                    if nfp_cache_key not in Shape.nfp_cache:
-                        missing_pairs.append({'shape_A': p.shape, 'angle_B': relative_angle, 'key': nfp_cache_key})
+                if nfp_cache_key not in Shape.nfp_cache:
+                    missing_pairs.append({'shape_A': p.shape, 'angle_B': relative_angle, 'key': nfp_cache_key})
         
         self.log(f"[PERF] precompute_nfp_batch: {len(missing_pairs)} missing pairs "
                  f"({len(angles)} angles × {len(sheet.parts)} placed parts)")

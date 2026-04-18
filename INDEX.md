@@ -126,6 +126,7 @@
 | Write new task entries for any todo list | `nw_todo_format` |
 | Work with FreeCAD API (Placement, ViewObject) | `nw_freecad_patterns` |
 | Work on code review tasks from `todo_code_review.md` | `nw_code_review_tasks` |
+| Modify nesting threading / QThread / parallelism | `nw_threading` |
 | Add logging | `logging` |
 
 ---

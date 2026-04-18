@@ -1,4 +1,4 @@
-from PySide import QtGui
+from PySide import QtCore, QtGui
 import FreeCAD
 import FreeCADGui
 import Part
@@ -8,8 +8,22 @@ from .algorithms import nesting_strategy
 from .algorithms import physics_nester
 from .visualization_manager import VisualizationManager
 
+def _main_thread_wrapper(fn):
+    """Wraps a callback so it always executes on the main thread."""
+    def wrapper(*args, **kwargs):
+        app = QtGui.QApplication.instance()
+        if not app:
+            fn(*args, **kwargs)
+            return
+            
+        if QtCore.QThread.currentThread() == app.thread():
+            fn(*args, **kwargs)
+        else:
+            QtCore.QTimer.singleShot(0, lambda: fn(*args, **kwargs))
+    return wrapper
+
 class NestingDependencyError(Exception):
-    """Custom exception for missing optional dependencies like Shapely."""
+# ... (rest of class)
     pass
 
 try:
@@ -23,7 +37,7 @@ except ImportError:
 # Global manager removed to improve testability and thread safety (CR-118)
 
 def _visualize_trial_placement(part, angle, x, y, viz_manager):
-    """Draws the boundary polygon at a trial position during simulation."""
+# ... (rest of function)
     if not viz_manager: return
     doc = FreeCAD.ActiveDocument
     if not doc or not FreeCAD.GuiUp:
@@ -47,13 +61,13 @@ def _visualize_trial_placement(part, angle, x, y, viz_manager):
         FreeCAD.Console.PrintWarning(f"[nesting_logic] Draw failed: {e}\n")
 
 def _cleanup_trial_viz(viz_manager):
-    """Removes the trial visualization object and simulation sheet boundaries."""
+# ... (rest of function)
     if not viz_manager: return
     doc = FreeCAD.ActiveDocument
     viz_manager.clear_trial_placement(doc)
 
 def _find_master_container_for_part(part):
-    """Finds the master container corresponding to a part being placed."""
+# ... (rest of function)
     doc = FreeCAD.ActiveDocument
     if not doc:
         return None
@@ -79,18 +93,18 @@ def _find_master_container_for_part(part):
     return None
 
 def _on_part_start(part, viz_manager):
-    """Called when starting to place a part - highlight the master shape's boundary."""
+# ... (rest of function)
     if not viz_manager: return
     master_container = _find_master_container_for_part(part)
     if master_container:
         viz_manager.highlight_master(master_container)
 
 def _on_part_end(part, placed, viz_manager):
-    """Called after part is placed."""
+# ... (rest of function)
     pass
 
 def _cleanup_highlighting(viz_manager):
-    """Called after nesting completes to ensure all highlighting is removed."""
+# ... (rest of function)
     if viz_manager:
         viz_manager.clear_highlight()
 
@@ -120,8 +134,12 @@ def nest(parts, width, height, rotation_steps=1, simulate=False, algorithm='Mink
         if viz_manager is None:
             viz_manager = VisualizationManager()
             
-        kwargs['trial_callback'] = lambda p, a, x, y: _visualize_trial_placement(p, a, x, y, viz_manager)
-        kwargs['part_start_callback'] = lambda p: _on_part_start(p, viz_manager)
+        kwargs['trial_callback'] = _main_thread_wrapper(
+            lambda p, a, x, y: _visualize_trial_placement(p, a, x, y, viz_manager)
+        )
+        kwargs['part_start_callback'] = _main_thread_wrapper(
+            lambda p: _on_part_start(p, viz_manager)
+        )
         kwargs['part_end_callback'] = lambda p, pl: _on_part_end(p, pl, viz_manager)
 
     if algorithm == 'Physics':
@@ -130,7 +148,9 @@ def nest(parts, width, height, rotation_steps=1, simulate=False, algorithm='Mink
         nester = nesting_strategy.Nester(width, height, rotation_steps, **kwargs)
 
     if simulate:
-        nester.update_callback = lambda part, sheet: (sheet.draw(FreeCAD.ActiveDocument, {}, transient_part=part), FreeCADGui.updateGui())
+        nester.update_callback = _main_thread_wrapper(
+            lambda part, sheet: (sheet.draw(FreeCAD.ActiveDocument, {}, transient_part=part), FreeCADGui.updateGui())
+        )
 
     import time
     start_time = time.monotonic()

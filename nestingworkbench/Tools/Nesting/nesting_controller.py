@@ -5,7 +5,9 @@ import Part
 import os
 import time
 import math
+import threading
 from PySide import QtGui
+from PySide.QtCore import QThread, Signal
 from ...datatypes.shape import Shape
 from .shape_preparer import ShapePreparer
 from .layout_manager import LayoutManager, Layout
@@ -18,6 +20,59 @@ try:
     from .visualization_manager import VisualizationManager
 except ImportError:
     pass
+
+class NestingWorker(QThread):
+    """Runs nesting computation on a background thread.
+    
+    Communicates with main thread via Qt signals for:
+    - Status/progress updates (non-blocking)
+    - Document operations like sheet.draw() (blocking synchronization)
+    - Completion/error reporting
+    """
+    status_changed = Signal(str)
+    progress_updated = Signal(int, int, str)   # current, total, message
+    draw_requested = Signal(object)             # payload dict for main-thread drawing
+    finished_signal = Signal(object)            # NestingJob result (or None)
+    error_signal = Signal(str)                  # error message + traceback
+    
+    def __init__(self, coordinator, run_args, cancel_check_fn, parent=None):
+        """
+        Args:
+            coordinator: GACoordinator instance
+            run_args: tuple of (target_layout, ui_params, quantities, master_map,
+                      rotation_params, algo_kwargs, is_simulating, viz_manager)
+            cancel_check_fn: callable that returns True if cancel requested
+        """
+        super().__init__(parent)
+        self.coordinator = coordinator
+        self.run_args = run_args
+        self.cancel_check_fn = cancel_check_fn
+        self._draw_event = threading.Event()
+    
+    def run(self):
+        """Execute nesting on worker thread."""
+        try:
+            (target_layout, ui_params, quantities, master_map,
+             rotation_params, algo_kwargs, is_simulating, viz_manager) = self.run_args
+            
+            job = self.coordinator.run(
+                target_layout, ui_params, quantities, master_map,
+                rotation_params, algo_kwargs, is_simulating, viz_manager=viz_manager
+            )
+            self.finished_signal.emit(job)
+        except Exception as e:
+            import traceback
+            self.error_signal.emit(f"{e}\n{traceback.format_exc()}")
+    
+    def request_draw_on_main_thread(self, payload):
+        """Called from worker thread. Emits signal and blocks until main thread draws."""
+        self._draw_event.clear()
+        self.draw_requested.emit(payload)
+        self._draw_event.wait()
+    
+    def notify_draw_complete(self):
+        """Called from main thread after draw finishes."""
+        self._draw_event.set()
 
 class NestingJob:
     """
@@ -338,20 +393,12 @@ class NestingController:
         self.ui.reset_progress()
         algo_kwargs['progress_callback'] = progress_cb
         
-        try:
-            self.is_running = True
-            self.cancel_requested = False
-            self.ui.nest_button.setEnabled(False)
-            self.ui.cancel_button.setEnabled(True)
-            self._execute_ga_nesting(target_layout, ui_params, quantities, master_map, 
-                                     rotation_params, algo_kwargs, is_simulating, self.viz_manager)
-        finally:
-            self.is_running = False
-            self.cancel_requested = False
-            self.ui.nest_button.setEnabled(True)
-            self.ui.cancel_button.setEnabled(False)
-            # Ensure progress bar is reset on finish/error
-            self.ui.reset_progress()
+        self.is_running = True
+        self.cancel_requested = False
+        self.ui.nest_button.setEnabled(False)
+        self.ui.cancel_button.setEnabled(True)
+        self._execute_ga_nesting(target_layout, ui_params, quantities, master_map, 
+                                 rotation_params, algo_kwargs, is_simulating, self.viz_manager)
     
     def load_selection(self):
         FreeCAD.Console.PrintMessage("Loading selection via Controller...\n")
@@ -663,7 +710,18 @@ class NestingController:
 
     def _execute_ga_nesting(self, target_layout, ui_params, quantities, master_map, 
                             rotation_params, algo_kwargs, is_simulating, viz_manager=None):
-        """GA optimization using multiple layouts."""
+        """GA optimization on a background thread."""
+        
+        # 1. Create worker (but don't start yet)
+        self._worker = NestingWorker(
+            coordinator=None, # Set below
+            run_args=(target_layout, ui_params, quantities, master_map,
+                      rotation_params, algo_kwargs, is_simulating, viz_manager),
+            cancel_check_fn=self._check_cancel,
+            parent=None
+        )
+        
+        # 2. Create coordinator bound to worker
         coordinator = GACoordinator(
             doc=self.doc,
             shape_preparer=self.shape_preparer,
@@ -672,12 +730,89 @@ class NestingController:
                 'update_progress': lambda c, t, m: self.ui.update_progress(c, t, m),
                 'reset_progress': lambda: self.ui.reset_progress(),
                 'play_sound': lambda: QtGui.QApplication.beep() if self.ui.sound_checkbox.isChecked() else None,
-            }
+            },
+            draw_callback=self._worker.request_draw_on_main_thread,
+            worker=self._worker
         )
-        self.current_job = coordinator.run(
-            target_layout, ui_params, quantities, master_map,
-            rotation_params, algo_kwargs, is_simulating, viz_manager=viz_manager
-        )
+        self._worker.coordinator = coordinator
+        
+        # 3. Connect signals
+        self._worker.status_changed.connect(lambda msg: self.ui.status_label.setText(msg))
+        self._worker.progress_updated.connect(lambda c, t, m: self.ui.update_progress(c, t, m))
+        self._worker.draw_requested.connect(self._handle_draw_request)
+        self._worker.finished_signal.connect(self._on_nesting_finished)
+        self._worker.error_signal.connect(self._on_nesting_error)
+        
+        # 4. Start thread
+        self._worker.start()
+
+    def _handle_draw_request(self, payload):
+        """Main-thread handler for draw requests from worker."""
+        try:
+            if payload.get('updateGui_only'):
+                FreeCADGui.updateGui()
+            elif payload.get('create_population'):
+                # Execute population creation on main thread
+                layouts = self._worker.coordinator.layout_manager.create_ga_population(
+                    payload['master_map'], payload['quantities'], 
+                    payload['ui_params'], payload['population_size'],
+                    payload['rotation_steps'], verbose=payload.get('verbose', False)
+                )
+                self._worker.coordinator._pending_layouts = layouts
+            elif payload.get('build_next_generation'):
+                # Execute next-gen building on main thread
+                layouts = self._worker.coordinator._build_next_generation(
+                    payload['gen'], payload['layouts'], payload['elites'], 
+                    payload['master_map'], payload['quantities'], payload['ui_params'], 
+                    payload['rotation_steps'], payload['mutation_rate'], 
+                    payload['immigrant_ratio'], payload.get('verbose', False)
+                )
+                self._worker.coordinator._pending_layouts = layouts
+            elif payload.get('cleanup_layouts'):
+                # Execute final cleanup on main thread
+                for layout in payload['layouts']:
+                    if layout != payload['best_layout']:
+                        self._worker.coordinator.layout_manager.delete_layout(layout, verbose=payload.get('verbose', False))
+            elif payload.get('sheets'):
+                for sheet in payload['sheets']:
+                    sheet.draw(payload['doc'], payload['ui_params'], payload['layout_group'],
+                              parts_to_place_group=payload['parts_group'], 
+                              verbose=payload.get('verbose', False))
+                if payload.get('hide_layout'):
+                    lg = payload['layout_group']
+                    if lg and hasattr(lg, "ViewObject"):
+                        lg.ViewObject.Visibility = False
+                FreeCADGui.updateGui()
+        finally:
+            self._worker.notify_draw_complete()
+
+    def _on_nesting_finished(self, job):
+        """Main-thread handler for nesting completion."""
+        if self.cancel_requested:
+            # Nesting was cancelled — clean up instead of keeping result
+            if job:
+                job.cleanup()
+            self.cancel_job()
+        else:
+            self.current_job = job
+            
+        self.is_running = False
+        self.cancel_requested = False
+        self.ui.nest_button.setEnabled(True)
+        self.ui.cancel_button.setEnabled(False)
+        self.ui.reset_progress()
+        self._worker = None
+
+    def _on_nesting_error(self, error_msg):
+        """Main-thread handler for nesting errors."""
+        FreeCAD.Console.PrintError(f"Nesting Error: {error_msg}\n")
+        self.ui.status_label.setText(f"Error: {error_msg.split(chr(10))[0]}")
+        self.is_running = False
+        self.cancel_requested = False
+        self.ui.nest_button.setEnabled(True)
+        self.ui.cancel_button.setEnabled(False)
+        self.ui.reset_progress()
+        self._worker = None
     
     def finalize_job(self):
         """Called when User clicks OK."""
@@ -708,8 +843,13 @@ class NestingController:
             self.cancel_requested = True
             try:
                 self.ui.status_label.setText("Cancelling... Please wait.")
+                self.ui.cancel_button.setEnabled(False) # Prevent double-click
             except Exception:
                 pass
+            
+            # If worker is running, also unblock it from any draw wait
+            if hasattr(self, '_worker') and self._worker:
+                self._worker.notify_draw_complete() # Unblock if waiting for draw
         else:
             self.cancel_job()
             if hasattr(self.ui, 'reject'):

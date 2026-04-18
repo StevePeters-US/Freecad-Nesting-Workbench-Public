@@ -95,6 +95,8 @@ class PlacementOptimizer:
                      self.trial_callback(part, best_result['angle'], best_result['x'], best_result['y'])
         else:
             # CPU Parallel evaluation
+            import time as _time
+            t0_parallel = _time.perf_counter()
             with ThreadPoolExecutor() as executor:
                 angles = [i * (360.0 / part_rotation_steps) for i in range(part_rotation_steps)]
                 futures = {
@@ -112,6 +114,11 @@ class PlacementOptimizer:
                                 self.trial_callback(part, best_result['angle'], best_result['x'], best_result['y'])
                     except Exception as e:
                         self.log(f"Error in rotation evaluation thread: {e}")
+            
+            dt_parallel = _time.perf_counter() - t0_parallel
+            if self.verbose:
+                self.log(f"  -> Parallel eval: {len(angles)} rotations in {dt_parallel*1000:.1f}ms "
+                         f"(ideal speedup: {len(angles)}x, pool workers: {min(len(angles), os.cpu_count() or 1)})")
         
         if self.verbose:
             self.log(f"  -> Best result for {part.id}: {best_result}")
@@ -124,8 +131,13 @@ class PlacementOptimizer:
         return None
 
     def _evaluate_rotation(self, angle, part, placed_parts_grouped, sheet, direction):
+        import time as _time, threading
+        t0 = _time.perf_counter()
+        thread_id = threading.current_thread().name
+        
         # 1. Get Combined NFP from Engine (Incrementally Cached on Sheet)
         nfp_entry = self.engine.get_global_nfp_for(part, angle, sheet)
+        t_nfp = _time.perf_counter()
         
         # Check for NFP calculation failure
         if nfp_entry is None:
@@ -181,6 +193,11 @@ class PlacementOptimizer:
         # Notify better result found
         if self.trial_callback and best.get('x') is not None:
              self.trial_callback(part, angle, best['x'], best['y'])
+             
+        t_end = _time.perf_counter()
+        if self.verbose:
+            self.log(f"    [{thread_id}] angle={angle:.0f}: NFP={((t_nfp-t0)*1000):.1f}ms, "
+                     f"score={((t_end-t_nfp)*1000):.1f}ms, total={((t_end-t0)*1000):.1f}ms")
              
         return best
 
