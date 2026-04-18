@@ -122,7 +122,6 @@ class MinkowskiEngine:
             with self._log_lock:
                 self.log_callback("MINKOWSKI_ENGINE: " + message)
         else:
-             import FreeCAD
              FreeCAD.Console.PrintMessage(f"MINKOWSKI_ENGINE: {message}\n")
 
     def get_global_nfp_for(self, part_to_place, angle, sheet):
@@ -239,7 +238,8 @@ class MinkowskiEngine:
                             polygon = translated_m
                         else:
                             polygon = polygon.union(translated_m)
-                    except Exception: pass
+                    except Exception as e:
+                        self.log(f"Visualization union failed (non-fatal): {e}")
                 else:
                     # Fallback: discretize individual shells (needs Shapely for .length/.interpolate)
                     for raw in raw_shells:
@@ -647,7 +647,8 @@ class MinkowskiEngine:
                 nfp_exterior_poly = unary_union(hulls_buffered)
                 if nfp_exterior_poly and not nfp_exterior_poly.is_empty:
                     master_nfp = nfp_exterior_poly
-            except Exception: pass
+            except Exception as e:
+                self.log(f"Visualization union failed (non-fatal): {e}")
                 
             nfp_data = {
                 "shells": nfp_shells,

@@ -124,7 +124,6 @@ class ManualNesterToolObserver:
             FreeCAD.Console.PrintMessage(f"Manual Nester Activated on {self.layout_group.Label}. Drag parts to move/nest.\n")
 
     def _discover_or_create_layout(self):
-        doc = self.view.getSceneGraph().getChild(0).getProperty("document").getValue() # Hack to get doc from view if needed, but FreeCAD.ActiveDocument is usually fine
         doc = FreeCAD.ActiveDocument
 
         # Try finding existing layout
@@ -909,10 +908,10 @@ class ManualNesterToolObserver:
             if self.selected_obj and hasattr(self, 'start_placement') and self.start_placement:
                  try:
                      self.selected_obj.Placement = self.start_placement
-                 except Exception:
-                     pass
-        except Exception:
-            pass
+                 except Exception as e:
+                     FreeCAD.Console.PrintWarning(f"[ManualNesterTool] Failed to revert selection: {e}\n")
+        except Exception as e:
+            FreeCAD.Console.PrintWarning(f"[ManualNesterTool] Cancel selection revert failed: {e}\n")
 
         FreeCAD.Console.PrintMessage("Operation Cancelled.\n")
 
@@ -923,10 +922,10 @@ class ManualNesterToolObserver:
                     try:
                         _ = obj.Name  # Trigger ReferenceError if C++ obj is deleted
                         obj.Placement = placement
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+                    except Exception as e:
+                        FreeCAD.Console.PrintWarning(f"[ManualNesterTool] Failed to revert displaced part: {e}\n")
+        except Exception as e:
+            FreeCAD.Console.PrintWarning(f"[ManualNesterTool] Pre-drag revert loop failed: {e}\n")
 
         self.pre_drag_placements = {}
 
@@ -953,8 +952,8 @@ class ManualNesterToolObserver:
             pass
         try:
             FreeCADGui.Selection.clearSelection() # Clear visual highlight
-        except Exception:
-            pass
+        except Exception as e:
+            FreeCAD.Console.PrintLog(f"[ManualNesterTool] Selection clear failed: {e}\n")
 
     # ------------------------------------------------------------------
     # Object picking
@@ -996,10 +995,12 @@ class ManualNesterToolObserver:
         Determines the actual object to drag based on what was clicked.
         Always returns the HIGHEST tracked container in the hierarchy.
         """
+        visited = set()
         # 1. Walk up parents to find the highest tracked container
         highest_tracked = None
         p = obj
-        while p:
+        while p and p not in visited:
+             visited.add(p)
              if p in self.original_placements:
                  highest_tracked = p # Keep updating to find the absolute highest tracked
 
@@ -1007,6 +1008,7 @@ class ManualNesterToolObserver:
                  # Check all parents in InList (FreeCAD objects can have multiple parents/links)
                  found_higher = False
                  for parent in p.InList:
+                     if parent in visited: continue
                      if parent in self.original_placements or any(anc in self.original_placements for anc in self._get_all_ancestors(parent)):
                          p = parent
                          found_higher = True
@@ -1070,8 +1072,8 @@ class ManualNesterToolObserver:
                 try:
                     if obj and obj.Name and obj in self.layout_group.Document.Objects:
                         obj.Placement = placement
-                except Exception:
-                    pass  # Object may already be deleted
+                except Exception as e:
+                    FreeCAD.Console.PrintWarning(f"[ManualNesterTool] Placement revert failed (object might be deleted): {e}\n")
 
         # Remove new objects and track deleted names to purge from tracking dicts
         deleted_names = set()
@@ -1085,7 +1087,7 @@ class ManualNesterToolObserver:
 
                 self.layout_group.Document.removeObject(obj.Name)
             except Exception as e:
-                pass # Can't safely log getattr if object is already dead
+                FreeCAD.Console.PrintWarning(f"[ManualNesterTool] Failed to remove new object: {e}\n")
 
         self.new_objects = []
 
@@ -1212,10 +1214,10 @@ class ManualNesterToolObserver:
                 b = next((c for c in child.Group if c.Label.startswith("Sheet_Boundary_")), None)
                 if b and hasattr(b, "Shape"):
                     bb = b.Shape.BoundBox
-                    right_edge = bb.XMax + b.Placement.Base.x
+                    right_edge = bb.XMax          # BoundBox already includes Placement
                     if right_edge > max_right:
                         max_right = right_edge
-                    sheet_origins.append(b.Placement.Base.x)
+                    sheet_origins.append(bb.XMin)  # Use actual left edge, not Placement.Base
 
         # Infer spacing from existing sheets if there are at least 2
         sheet_origins.sort()

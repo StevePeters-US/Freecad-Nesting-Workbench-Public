@@ -356,12 +356,13 @@ class GACoordinator:
             return None
             
         except Exception as e:
-            FreeCAD.Console.PrintError(f"GA Nesting Error: {e}\n")
             import traceback
-            traceback.print_exc()
+            error_str = traceback.format_exc()
+            FreeCAD.Console.PrintError(f"GA Nesting Error: {e}\n{error_str}\n")
             try:
                 self._set_status(f"Error: {e}")
-            except RuntimeError: pass
+            except RuntimeError:
+                FreeCAD.Console.PrintLog("[GACoordinator] Failed to update status: Panel likely closed.\n")
             # Cleanup all remaining layouts on error
             for layout in layouts:
                 layout_manager.delete_layout(layout)

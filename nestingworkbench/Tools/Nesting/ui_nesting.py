@@ -293,8 +293,8 @@ class NestingPanel(QtGui.QWidget):
         self.physics_settings_group.setLayout(physics_form_layout)
 
         # Set initial visibility
-        self.minkowski_settings_group.setVisible(False)
-        self.physics_settings_group.setVisible(True)
+        self.minkowski_settings_group.setVisible(True)
+        self.physics_settings_group.setVisible(False)
 
 
 
@@ -515,7 +515,8 @@ class NestingPanel(QtGui.QWidget):
     def set_default_font(self):
         """Checks for and sets a default font on initialization."""
         try:
-            workbench_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            workbench_root = os.path.abspath(os.path.join(current_dir, '..', '..', '..'))
             fonts_dir = os.path.join(workbench_root, "fonts")
             default_font_file = "PoiretOne-Regular.ttf"
             default_font_path = os.path.join(fonts_dir, default_font_file)
@@ -523,9 +524,8 @@ class NestingPanel(QtGui.QWidget):
             if os.path.exists(default_font_path):
                 self.selected_font_path = default_font_path
                 self.font_label.setText(default_font_file)
-        except Exception:
-            # Silently fail, no default will be set.
-            pass
+        except Exception as e:
+            FreeCAD.Console.PrintWarning(f"[NestingPanel] Failed to set default font: {e}\n")
 
     def log_message(self, message, level="message"):
         """Displays a message in the status label and logs to the console."""

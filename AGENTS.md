@@ -164,16 +164,20 @@ Order: stdlib → FreeCAD → third-party → local (relative). No `import *`. R
 
 | ID | File | Issue | Fix Hint |
 |----|------|-------|----------|
-| T-022 | `nesting_logic.py` | Two global vars track visualization state | Extract to `VisualizationManager` class |
-| T-024 | `shape_preparer.py` | `_handle_new_master()` is ~170 lines | Split into 3 helpers |
-| T-025 | `sheet.py` | `_draw_single_part()` is ~140 lines | Split into final/simulation paths |
-| T-026 | `task_panel_manager.py:36-38` | Runtime import to break circular dependency | Replace with callback pattern |
-| M-B01 | `manual_nester_tool.py:310` | Scroll wheel handler is dead code | Move into existing SoMouseButtonEvent block |
-| M-B02 | `manual_nester_tool.py` | Access violation on right-click when idle | Guard `cancel_operation()` with mode check |
-| M-B03 | `manual_nester_tool.py:505` | `_get_obj_center()` crashes on App::Part | Add `_get_shape_bbox()` helper |
-| M-B04 | `physics_engine.py` | Physics pushes in drag direction, not repulsion | Use radial repulsion vector |
-| M-B05 | `manual_nester_tool.py` | Never calls `separate_overlapping()` | Add overlap resolution after physics |
-| M-B06 | `collision_resolver.py:112` | `_get_abs_bbox()` crashes on App::Part | Add `_find_bbox()` helper for containers |
+| T-022 | `nesting_logic.py` | `viz_manager` is a module-level global singleton | See CR-118: convert to parameter |
+| T-024 | `shape_preparer.py` | `_handle_new_master()` is ~105 lines | See CR-108c: extract `_create_master_container()` |
+| T-025 | `sheet.py` | **Fixed** — split into `_draw_final_part()` + `_draw_simulation_part()` | — |
+| T-026 | `task_panel_manager.py:36-38` / `ui_nesting.py:406` | Runtime import to break circular dependency | Replace with callback pattern (CR-111, CR-112) |
+| M-B01 | `manual_nester_tool.py` | **Fixed** — scroll wheel moved into InputManager | — |
+| M-B02 | `manual_nester_tool.py` | **Fixed** — `cancel_operation()` guards with mode check | — |
+| M-B03 | `manual_nester_tool.py` | **Fixed** — `_get_shape_bbox()` helper added | — |
+| M-B04 | `physics_engine.py` | **Fixed** — radial repulsion vector implemented | — |
+| M-B05 | `manual_nester_tool.py` | `separate_overlapping()` called with max_iterations=1 only | Increase iterations or call after physics settle |
+| M-B06 | `collision_resolver.py` | **Fixed** — `_find_bbox_with_placement()` added | — |
+| CR-101 | `nesting_controller.py` | `NestingJob.cleanup()` deletes objects from other sessions | See `todo_code_review.md` CR-101 |
+| CR-102 | `manual_nester_tool.py` | Dead Coin3D scene-graph access line | See `todo_code_review.md` CR-102 |
+| CR-105 | `ui_nesting.py` | Algorithm dropdown default mismatches visible settings group | See `todo_code_review.md` CR-105 |
+| CR-107 | `manual_nester_tool.py` | `_add_new_sheet()` double-counts BoundBox X offset | See `todo_code_review.md` CR-107 |
 
 ---
 

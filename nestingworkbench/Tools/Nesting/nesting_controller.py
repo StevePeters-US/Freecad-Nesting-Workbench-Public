@@ -35,6 +35,7 @@ class NestingJob:
         self.parts_group = None # The "PartsToPlace" bin
         self.sheets = []
         
+        self._owned_object_names: set[str] = set()
         self._init_sandbox()
 
     @classmethod
@@ -48,12 +49,21 @@ class NestingJob:
         job.temp_layout = layout_group
         job.parts_group = parts_group
         job.sheets = sheets
+        
+        job._owned_object_names = set()
+        if layout_group: job._owned_object_names.add(layout_group.Name)
+        if parts_group: job._owned_object_names.add(parts_group.Name)
+        
         return job
 
     def _init_sandbox(self):
         """Creates the temporary layout and parts bin."""
         self.temp_layout = self.doc.addObject("App::DocumentObjectGroup", "Layout_temp")
         self.parts_group = self.doc.addObject("App::DocumentObjectGroup", "PartsToPlace")
+        
+        self._owned_object_names.add(self.temp_layout.Name)
+        self._owned_object_names.add(self.parts_group.Name)
+        
         self.temp_layout.addObject(self.parts_group)
         
         if hasattr(self.temp_layout, "ViewObject"):
@@ -107,7 +117,9 @@ class NestingJob:
 
     def _persist_metadata(self, quantities, rotation_params):
         master_group = self.temp_layout.getObject("MasterShapes")
-        if not master_group: return
+        if not master_group:
+            FreeCAD.Console.PrintWarning("[NestingJob] MasterShapes group not found in sandbox, cannot persist metadata.\n")
+            return
         
         for container in master_group.Group:
              if not hasattr(container, "Group"): continue
@@ -198,20 +210,14 @@ class NestingJob:
 
     def cleanup(self):
         """Destroys the sandbox."""
-        if self.temp_layout:
-            recursive_delete(self.doc, self.temp_layout)
-            self.temp_layout = None
-            
-        # Safety: Check for any floating PartsToPlace that might have escaped
-        # (Though with proper containment this shouldn't happen)
-        match_names = []
-        for obj in self.doc.Objects:
-            if obj.Label.startswith("PartsToPlace") or obj.Label.startswith("Layout_temp"):
-                 match_names.append(obj.Name)
+        for name in list(self._owned_object_names):
+            obj = self.doc.getObject(name)
+            if obj:
+                recursive_delete(self.doc, obj)
+        self._owned_object_names.clear()
         
-        for name in match_names:
-            o = self.doc.getObject(name)
-            if o: recursive_delete(self.doc, o)
+        self.temp_layout = None
+        self.parts_group = None
 
 
 
@@ -774,7 +780,8 @@ class NestingController:
                                 # Hide MasterShapes
                                 if child.Label.startswith("MasterShapes") and hasattr(child, "ViewObject"):
                                     child.ViewObject.Visibility = False
-                except Exception: pass
+                except Exception as e:
+                    FreeCAD.Console.PrintWarning(f"[NestingController] Cancel cleanup failed for child: {e}\n")
             
             self.current_job = None
             FreeCAD.Console.PrintMessage("Job Cancelled.\n")
@@ -828,7 +835,9 @@ class NestingController:
         if target:
             try:
                 if target not in self.doc.Objects: target = None
-            except Exception: target = None
+            except Exception as e:
+                FreeCAD.Console.PrintWarning(f"[NestingController] Target validation failed: {e}\n")
+                target = None
             
         # Infer from selection
         if not target and hasattr(self.ui, 'selected_shapes_to_process') and self.ui.selected_shapes_to_process:
@@ -957,7 +966,9 @@ class NestingController:
                 
                 # Store rotation params (value AND override flag) for persistence
                 rotation_params[label] = (rot_val, override)
-            except Exception: continue
+            except Exception as e:
+                FreeCAD.Console.PrintWarning(f"[NestingController] Skipping row {row} in shape table: {e}\n")
+                continue
             
         # Map objects
         for obj in self.ui.selected_shapes_to_process:
@@ -965,7 +976,8 @@ class NestingController:
                  lbl = obj.Label.replace("master_shape_", "")
                  if lbl in quantities:
                      master_map[obj.Label] = obj
-             except Exception: pass
+             except Exception as e:
+                 FreeCAD.Console.PrintWarning(f"[NestingController] Failed to map object {obj.Label if hasattr(obj, 'Label') else 'unknown'}: {e}\n")
              
         return ui_settings, quantities, master_map, rotation_params
 
