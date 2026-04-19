@@ -189,7 +189,8 @@ class MinkowskiEngine:
                         p.shape, 0.0, part_to_place, relative_angle, nfp_cache_key
                     )
                 dt_miss = (time.perf_counter() - t_miss) * 1000
-                self.log(f"[PERF] NFP cache MISS key={nfp_cache_key[:3]} angle={relative_angle:.1f} -> {dt_miss:.1f}ms")
+                if self.verbose:
+                    self.log(f"[PERF] NFP cache MISS key={nfp_cache_key[:3]} angle={relative_angle:.1f} -> {dt_miss:.1f}ms")
                 with self._perf_lock:
                     self._perf_stats['nfp_compute_ms'] += dt_miss
             else:
@@ -243,19 +244,32 @@ class MinkowskiEngine:
                     except Exception as e:
                         self.log(f"Visualization union failed (non-fatal): {e}")
                 else:
-                    # Extract vertices from pre-transformed batched shells — no Shapely needed.
-                    # Shell vertices are valid NFP boundary candidates; avoids per-shell
-                    # rotate/translate/discretize which is O(N_shells) Shapely ops.
-                    for shell in part_shells:
-                        coords = shell.exterior.coords  # numpy array, already in final position
-                        points.extend(Point(float(c[0]), float(c[1])) for c in coords[:-1])
+                    # Vectorized candidate extraction from all shell edges.
+                    # Collects all edge start/end coords in two numpy arrays (one Python
+                    # iteration per shell just to gather coords — no per-edge computation),
+                    # then samples midpoints in a single broadcast and deduplicates on a
+                    # coarse grid to remove overlap from 1024+ nearly-identical shells.
+                    if part_shells:
+                        e_starts = np.concatenate([s.exterior.coords[:-1] for s in part_shells], axis=0)
+                        e_ends   = np.concatenate([s.exterior.coords[1:]  for s in part_shells], axis=0)
+                        # Sample start + midpoint of every edge (2 pts per edge)
+                        mid = (e_starts + e_ends) * 0.5
+                        pts_raw = np.concatenate([e_starts, mid], axis=0)
+                        # Deduplicate on step_size grid — coarse enough to collapse the
+                        # hundreds of nearly-identical shells, fine enough to keep quality
+                        step = self.step_size
+                        grid = max(1.0, step)
+                        rounded = np.round(pts_raw / grid).astype(np.int32)
+                        _, unique_idx = np.unique(rounded, axis=0, return_index=True)
+                        pts_unique = pts_raw[unique_idx]
+                        points.extend(Point(float(c[0]), float(c[1])) for c in pts_unique)
 
                 # Add IFP void boundary edges as placement candidates (void nesting)
                 for piece in part_holes:
                     points.extend(self._discretize_edge(piece.exterior))
 
                 dt_xform = (time.perf_counter() - t_xform) * 1000
-                if dt_xform > 20.0:
+                if self.verbose and dt_xform > 20.0:
                     xform_path = "batched" if shells_batch is not None else "per-shell"
                     self.log(f"[PERF] NFP xform slow ({xform_path}): {placed_label}->{part_label} "
                              f"{len(part_shells)}shells {len(part_holes)}holes -> {dt_xform:.1f}ms")
@@ -278,7 +292,7 @@ class MinkowskiEngine:
         with self._perf_lock:
             self._perf_stats['cache_hits'] += n_hits
             self._perf_stats['cache_misses'] += n_misses
-        if n_misses > 0 or dt_total > 10.0:
+        if self.verbose and (n_misses > 0 or dt_total > 10.0):
             self.log(f"[PERF] get_global_nfp_for angle={angle:.1f} "
                      f"hits={n_hits} misses={n_misses} "
                      f"total={dt_total:.1f}ms candidates={len(points)}")
@@ -355,10 +369,11 @@ class MinkowskiEngine:
         resampled = self._resample_for_decomp(centered)
         orig_verts = len(centered.exterior.coords) - 1
         new_verts = len(resampled.exterior.coords) - 1
-        if orig_verts != new_verts:
+        if self.verbose and orig_verts != new_verts:
             self.log(f"[DECOMP] '{shape_id}': {orig_verts} → {new_verts} verts before triangulation")
         parts = minkowski_utils.decompose_if_needed(resampled, self.log)
-        self.log(f"[DECOMP] '{shape_id}': {len(parts)} convex parts")
+        if self.verbose:
+            self.log(f"[DECOMP] '{shape_id}': {len(parts)} convex parts")
         with self._decomp_lock:
             self._decomp_cache[shape_id] = parts
         return parts
@@ -401,8 +416,9 @@ class MinkowskiEngine:
                         'has_holes': has_holes,
                     })
 
-        self.log(f"[PERF] precompute_nfp_batch: {len(missing_pairs)} missing pairs "
-                 f"({len(angles)} angles × {len(sheet.parts)} placed parts)")
+        if self.verbose:
+            self.log(f"[PERF] precompute_nfp_batch: {len(missing_pairs)} missing pairs "
+                     f"({len(angles)} angles × {len(sheet.parts)} placed parts)")
         if not missing_pairs:
             return
 
@@ -476,7 +492,8 @@ class MinkowskiEngine:
         except Exception as e:
             self.log(f"Batch NFP precompute error: {e}")
         dt_batch = (time.perf_counter() - t0_batch) * 1000
-        self.log(f"[PERF] precompute_nfp_batch total: {dt_batch:.1f}ms")
+        if self.verbose:
+            self.log(f"[PERF] precompute_nfp_batch total: {dt_batch:.1f}ms")
 
     def _fill_ifp_pass(self, hole_fill_pairs):
         """Pass 2: compute IFPs for hole-shape cache entries and update in-place.
@@ -503,7 +520,8 @@ class MinkowskiEngine:
             list(executor.map(_compute_one, hole_fill_pairs))
 
         dt = (time.perf_counter() - t0) * 1000
-        self.log(f"[PERF] IFP fill-in: {len(hole_fill_pairs)} pairs in {dt:.1f}ms")
+        if self.verbose:
+            self.log(f"[PERF] IFP fill-in: {len(hole_fill_pairs)} pairs in {dt:.1f}ms")
 
     def _compute_ifp_for_hole_shape(self, shape_A, part_to_place, angle_B):
         """Compute IFP convex parts for a placed shape with interior rings (holes).
@@ -548,8 +566,9 @@ class MinkowskiEngine:
         dir_x, dir_y = self.search_direction
         t0_score = time.perf_counter()
         total_candidates = sum(len(pts) for _, pts, _ in rotation_candidates)
-        self.log(f"[PERF] score_candidates_gpu: {len(rotation_candidates)} angles, "
-                 f"{total_candidates} total candidates")
+        if self.verbose:
+            self.log(f"[PERF] score_candidates_gpu: {len(rotation_candidates)} angles, "
+                     f"{total_candidates} total candidates")
 
         for angle, points, nfp_entry in rotation_candidates:
             
@@ -616,7 +635,8 @@ class MinkowskiEngine:
             if self.verbose and n_scored > 0:
                 self.log(f"GPU scored {n_scored} candidates in batch at angle {angle}")
         dt_score = (time.perf_counter() - t0_score) * 1000
-        self.log(f"[PERF] score_candidates_gpu total: {dt_score:.1f}ms best={best_overall.get('metric', 'inf'):.2f}")
+        if self.verbose:
+            self.log(f"[PERF] score_candidates_gpu total: {dt_score:.1f}ms best={best_overall.get('metric', 'inf'):.2f}")
         return best_overall
 
     def _calculate_and_cache_nfp(self, shape_A, angle_A, part_to_place, angle_B, cache_key):
