@@ -53,7 +53,7 @@ class LayoutManager:
         self._layout_counter = 0
     
     def create_layout(self, name, master_shapes_map, quantities, ui_params, 
-                      clone_from=None, chromosome_ordering=None) -> Layout:
+                      chromosome_ordering=None) -> Layout:
         """
         Creates a new layout with master shapes and part instances.
         
@@ -62,7 +62,6 @@ class LayoutManager:
             master_shapes_map: Dict mapping labels to FreeCAD shape objects
             quantities: Dict mapping labels to (quantity, rotation_steps)
             ui_params: UI parameters dict
-            clone_from: Optional Layout to clone masters from (for GA)
             chromosome_ordering: Optional list of (part_id, angle) tuples for ordering
             
         Returns:
@@ -270,33 +269,3 @@ class LayoutManager:
         
         return population
     
-    def select_elite(self, layouts, elite_count) -> list:
-        """
-        Selects the best layouts based on fitness.
-        
-        Args:
-            layouts: List of Layout objects (should be sorted by fitness already)
-            elite_count: Number of best layouts to keep
-            
-        Returns:
-            List of elite Layout objects
-        """
-        # Sort by fitness (lower is better)
-        sorted_layouts = sorted(layouts, key=lambda l: l.fitness)
-        return sorted_layouts[:elite_count]
-    
-    def cleanup_worst(self, layouts, keep_count):
-        """
-        Deletes the worst layouts, keeping only the top performers.
-        
-        Args:
-            layouts: List of Layout objects
-            keep_count: Number of best layouts to keep
-        """
-        # Sort by fitness (lower is better)
-        sorted_layouts = sorted(layouts, key=lambda l: l.fitness)
-        
-        # Delete layouts beyond keep_count
-        for layout in sorted_layouts[keep_count:]:
-            FreeCAD.Console.PrintMessage(f"Deleting layout {layout.name} (efficiency: {layout.efficiency:.1f}%)\n")
-            self.delete_layout(layout)

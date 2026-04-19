@@ -20,7 +20,6 @@ try:
 except ImportError:
     Draft = None
 
-from .shape_object import create_shape_object
 from .label_object import create_label_object
 from ..Tools.Nesting import placement_utils
 
@@ -63,31 +62,6 @@ class Sheet:
         """
         return FreeCAD.Vector(self.id * (self.width + self.spacing), 0, 0)
 
-    def calculate_fill_percentage(self, use_unbuffered_area=True):
-        """
-        Calculates the fill percentage of the sheet.
-
-        Args:
-            use_unbuffered_area (bool): If True, uses the original part area without spacing.
-                                        If False, uses the buffered area (including spacing).
-
-        Returns:
-            float: The fill percentage (0-100), or 0 if sheet area is zero.
-        """
-        sheet_area = self.width * self.height
-        if sheet_area == 0:
-            return 0.0
-
-        total_part_area = 0
-        for part in self.parts:
-            if part.shape:
-                if use_unbuffered_area and part.shape.unbuffered_polygon:
-                    total_part_area += part.shape.unbuffered_polygon.area
-                elif part.shape.polygon: # Fallback to buffered
-                    total_part_area += part.shape.polygon.area
-        
-        return (total_part_area / sheet_area) * 100.0
-
 
 
     def is_placement_valid(self, shape_to_check, part_to_ignore=None):
@@ -118,30 +92,6 @@ class Sheet:
         
         return True
 
-    def is_placement_valid_polygon(self, polygon_to_check, part_to_ignore=None):
-        """
-        Checks if a shapely polygon's placement is valid on this sheet.
-        This version is for checking raw polygons without a full Shape object.
-
-        Args:
-            polygon_to_check (shapely.geometry.Polygon): The polygon at the desired location.
-            part_to_ignore (Shape, optional): A specific shape to exclude from the collision check.
-
-        Returns:
-            bool: True if the placement is valid, False otherwise.
-        """
-        if not SHAPELY_AVAILABLE or not polygon_to_check: return False
-
-        bin_polygon = Polygon([(0, 0), (self.width, 0), (self.width, self.height), (0, self.height)])
-        if not bin_polygon.contains(polygon_to_check):
-            return False
-
-        for placed_part in self.parts:
-            if placed_part.shape != part_to_ignore and placed_part.shape and placed_part.shape.polygon:
-                if polygon_to_check.intersects(placed_part.shape.polygon):
-                    return False
-        
-        return True
 
     def draw(self, doc, ui_params, parent_group=None, transient_part=None, parts_to_place_group=None, x_offset=0, verbose=False):
         """

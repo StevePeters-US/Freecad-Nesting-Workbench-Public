@@ -56,14 +56,6 @@ class GACoordinator:
             except RuntimeError:
                 pass
 
-    def _reset_progress(self):
-        callback = self.ui_callbacks.get('reset_progress')
-        if callback:
-            try:
-                callback()
-            except RuntimeError:
-                pass
-
     def _play_sound(self):
         callback = self.ui_callbacks.get('play_sound')
         if callback:

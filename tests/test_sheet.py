@@ -49,30 +49,4 @@ def test_sheet_is_placement_valid_collision():
     # but here is_placement_valid uses .intersects() which is True for shared boundary.
     assert sheet.is_placement_valid(shape2_edge) is False
 
-def test_sheet_calculate_fill_percentage():
-    # Empty sheet (T-017)
-    sheet = Sheet("test_sheet", 100, 100)
-    assert sheet.calculate_fill_percentage() == 0.0
-    
-    # Partially covered sheet (T-017)
-    shape1 = MagicMock()
-    shape1.unbuffered_polygon.area = 2500.0 # 25% of 100x100
-    shape1.polygon.area = 3000.0 # Buffered area
-    placed_part1 = MagicMock()
-    placed_part1.shape = shape1
-    sheet.add_part(placed_part1)
-    
-    # Test with unbuffered area (default)
-    assert sheet.calculate_fill_percentage(use_unbuffered_area=True) == 25.0
-    # Test with buffered area
-    assert sheet.calculate_fill_percentage(use_unbuffered_area=False) == 30.0
-    
-    # Fully covered sheet (~100%) (T-017)
-    shape2 = MagicMock()
-    shape2.unbuffered_polygon.area = 7500.0
-    shape2.polygon.area = 7000.0 # Just for variety
-    placed_part2 = MagicMock()
-    placed_part2.shape = shape2
-    sheet.add_part(placed_part2)
-    
-    assert sheet.calculate_fill_percentage(use_unbuffered_area=True) == 100.0
+

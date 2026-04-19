@@ -1,5 +1,5 @@
 import math
-import warnings
+
 import threading
 
 try:
@@ -332,48 +332,6 @@ if TAICHI_AVAILABLE:
             
         return results
 
-    # Max vertices per input polygon for GPU union fallback
-    POLY_MAX_VERTS = 64
-
-    def union_convex_hulls_gpu(hull_polygons):
-        """
-        Computes the convex hull of all input convex polygons on GPU.
-        This is a fast, conservative approximation of unary_union(hull_polygons).
-        """
-        if not hull_polygons:
-            return None
-        if len(hull_polygons) == 1:
-            return hull_polygons[0]
-            
-        # Fallback to CPU if any polygon is too complex for our fixed-size GPU buffers
-        # or if we have no polygons.
-        total_pts = 0
-        for p in hull_polygons:
-            if not p or p.is_empty:
-                continue
-            v_count = len(p.exterior.coords) - 1
-            if v_count > POLY_MAX_VERTS:
-                return None # Fallback
-            total_pts += v_count
-                
-        if total_pts < 3:
-            return None
-            
-        # Pack all vertices into a single point cloud for the GPU
-        points_np = np.zeros((1, total_pts, 2), dtype=np.float32)
-        current_idx = 0
-        for p in hull_polygons:
-            if not p or p.is_empty:
-                continue
-            coords = np.array(p.exterior.coords)[:-1]
-            points_np[0, current_idx:current_idx + len(coords)] = coords
-            current_idx += len(coords)
-            
-        n_points_np = np.array([total_pts], dtype=np.int32)
-        
-        # Call the GPU hull compute (reusing the kernel from GPU-001)
-        results = compute_convex_hulls_gpu(points_np, n_points_np)
-        return results[0] if results else None
 
     @ti.kernel
     def bounds_check_kernel(
@@ -611,8 +569,6 @@ else:
     def compute_nfp_batch(poly_a_list, poly_b_list, rotations_deg):
         raise ImportError("Taichi is not installed. Cannot compute GPU NFP.")
 
-    def union_convex_hulls_gpu(hull_polygons):
-        raise ImportError("Taichi is not installed. Cannot compute GPU Union.")
 
     def bounds_check_kernel(n_pts, points, rotated_extents, bin_w, bin_h, results):
         raise ImportError("Taichi is not installed. Cannot compute GPU bounds check.")

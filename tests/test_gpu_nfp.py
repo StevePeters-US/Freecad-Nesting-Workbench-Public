@@ -2,7 +2,7 @@ import pytest
 import numpy as np
 from shapely.geometry import Polygon, MultiPoint
 from nestingworkbench.Tools.Nesting.algorithms.nfp_gpu_taichi import (
-    TAICHI_AVAILABLE, compute_nfp_pairs, compute_nfp_batch, union_convex_hulls_gpu
+    TAICHI_AVAILABLE, compute_nfp_pairs, compute_nfp_batch
 )
 
 @pytest.mark.skipif(not TAICHI_AVAILABLE, reason="Taichi not available")
@@ -62,20 +62,3 @@ def test_gpu_convex_hull_empty_input():
     assert results[0] is not None
     assert results[0].area > 0
 
-@pytest.mark.skipif(not TAICHI_AVAILABLE, reason="Taichi not available")
-def test_gpu_union_correctness():
-    # Two disjoint squares
-    poly1 = Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
-    poly2 = Polygon([(2, 2), (3, 2), (3, 3), (2, 3)])
-    
-    hulls = [poly1, poly2]
-    union_hull = union_convex_hulls_gpu(hulls)
-    
-    assert union_hull is not None
-    # The convex hull of [(0,0), (1,1), (2,2), (3,3)] and other corners 
-    # should have bounds (0, 0, 3, 3).
-    assert union_hull.bounds == (0.0, 0.0, 3.0, 3.0)
-    # Area of convex hull of two 1x1 squares at (0,0) and (2,2) 
-    # is larger than 2.0. it's basically the area of the polygon 
-    # encompassing both.
-    assert union_hull.area > 2.0

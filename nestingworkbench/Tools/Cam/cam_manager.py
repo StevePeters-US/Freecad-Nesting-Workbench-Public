@@ -46,7 +46,6 @@ class CAMManager:
         """
         # Import CAM modules (FreeCAD 1.1+)
         try:
-            from CAM.Path.Main import Job as PathJob
             from CAM.Path.Main import Stock as PathStock
         except ImportError as e:
             FreeCAD.Console.PrintError(f"Failed to import CAM modules. Error: {e}\\n")

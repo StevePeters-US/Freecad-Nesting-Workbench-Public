@@ -271,7 +271,7 @@ class ManualNesterToolObserver:
             # Clicked on empty space
             self.selected_obj = None
 
-    def handle_move(self, pos, snap=False, shift_held=False):
+    def handle_move(self, pos, snap=False, _shift_held=False):
         """Process mouse movement during an active drag or free-grab."""
         if not self.selected_obj:
             return
@@ -447,19 +447,6 @@ class ManualNesterToolObserver:
     # ------------------------------------------------------------------
     # Deferred helpers (called via QTimer to avoid Coin3D scene-graph crashes)
     # ------------------------------------------------------------------
-
-    def _deferred_add_object_to_group(self, shapes_group_name, selected_obj_name):
-        try:
-            doc = FreeCAD.ActiveDocument
-            if self.layout_group and hasattr(self.layout_group, 'Document'):
-                doc = self.layout_group.Document
-            if doc:
-                grp = doc.getObject(shapes_group_name)
-                obj = doc.getObject(selected_obj_name)
-                if grp and obj:
-                    grp.addObject(obj)
-        except Exception as e:
-            FreeCAD.Console.PrintWarning(f"[ManualNesterTool] Deferred add failed: {e}\n")
 
     def _deferred_move_object_to_sheet(self, target_shapes_name, obj_name, old_shapes_name):
         """Move an object from one sheet's Shapes_ group to another."""
@@ -1024,20 +1011,7 @@ class ManualNesterToolObserver:
 
         FreeCAD.Console.PrintMessage("Manual Nester: Transformations cancelled and new items removed.\n")
 
-    def _revert_single_object(self, obj):
-        """Removes a single object and its related parts if it was newly created."""
-        # Find container if needed
-        # (Simplified: just remove by name if tracked)
-        try:
-             # If it's a container (App::Part), we should remove its children too?
-             # self.new_objects already contains children in order.
-             if obj in self.new_objects:
-                 self.layout_group.Document.removeObject(obj.Name)
-                 self.new_objects.remove(obj)
-                 if self.selected_obj == obj: self.selected_obj = None
-        except Exception as e:
-            FreeCAD.Console.PrintWarning(f"[ManualNesterTool] Failed to revert object {obj.Name}: {e}\n")
-            pass
+
 
     def cleanup(self):
         """Removes the event callbacks from the view and restores original visibilities."""
