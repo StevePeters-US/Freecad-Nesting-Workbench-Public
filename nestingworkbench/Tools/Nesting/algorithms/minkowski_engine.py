@@ -5,7 +5,7 @@ import numpy as np
 import FreeCAD
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
-from shapely.geometry import Polygon, Point, MultiPoint
+from shapely.geometry import Polygon, Point
 from shapely.affinity import translate, rotate
 from . import minkowski_utils
 try:
@@ -226,43 +226,17 @@ class MinkowskiEngine:
 
                 per_part_nfps.append({'shells': part_shells, 'holes': part_holes})
 
-                # Candidate points: discretize NFP shell boundary edges
-                master = nfp_data.get('polygon')
-                if master and not master.is_empty:
-                    rotated_m = rotate(master, placed_angle, origin=(0, 0)) if abs(placed_angle) > 1e-9 else master
-                    translated_m = translate(rotated_m, xoff=cent.x, yoff=cent.y)
-                    points.extend(self._discretize_edge(translated_m.exterior))
-                    for interior in translated_m.interiors:
-                        points.extend(self._discretize_edge(interior))
-
-                    # Best-effort union for global visualization ONLY
-                    try:
-                        if polygon.is_empty:
-                            polygon = translated_m
-                        else:
-                            polygon = polygon.union(translated_m)
-                    except Exception as e:
-                        self.log(f"Visualization union failed (non-fatal): {e}")
-                else:
-                    # Vectorized candidate extraction from all shell edges.
-                    # Collects all edge start/end coords in two numpy arrays (one Python
-                    # iteration per shell just to gather coords — no per-edge computation),
-                    # then samples midpoints in a single broadcast and deduplicates on a
-                    # coarse grid to remove overlap from 1024+ nearly-identical shells.
-                    if part_shells:
-                        e_starts = np.concatenate([s.exterior.coords[:-1] for s in part_shells], axis=0)
-                        e_ends   = np.concatenate([s.exterior.coords[1:]  for s in part_shells], axis=0)
-                        # Sample start + midpoint of every edge (2 pts per edge)
-                        mid = (e_starts + e_ends) * 0.5
-                        pts_raw = np.concatenate([e_starts, mid], axis=0)
-                        # Deduplicate on step_size grid — coarse enough to collapse the
-                        # hundreds of nearly-identical shells, fine enough to keep quality
-                        step = self.step_size
-                        grid = max(1.0, step)
-                        rounded = np.round(pts_raw / grid).astype(np.int32)
-                        _, unique_idx = np.unique(rounded, axis=0, return_index=True)
-                        pts_unique = pts_raw[unique_idx]
-                        points.extend(Point(float(c[0]), float(c[1])) for c in pts_unique)
+                # Candidate points: vectorized extraction from all shell edges.
+                if part_shells:
+                    e_starts = np.concatenate([s.exterior.coords[:-1] for s in part_shells], axis=0)
+                    e_ends   = np.concatenate([s.exterior.coords[1:]  for s in part_shells], axis=0)
+                    mid = (e_starts + e_ends) * 0.5
+                    pts_raw = np.concatenate([e_starts, mid], axis=0)
+                    grid = max(1.0, self.step_size)
+                    rounded = np.round(pts_raw / grid).astype(np.int32)
+                    _, unique_idx = np.unique(rounded, axis=0, return_index=True)
+                    pts_unique = pts_raw[unique_idx]
+                    points.extend(Point(float(c[0]), float(c[1])) for c in pts_unique)
 
                 # Add IFP void boundary edges as placement candidates (void nesting)
                 for piece in part_holes:
@@ -284,9 +258,20 @@ class MinkowskiEngine:
                     polygon = translated
                 else:
                     polygon = polygon.union(translated)
-                points.extend(self._discretize_edge(translated.exterior))
-                for interior in translated.interiors:
-                    points.extend(self._discretize_edge(interior))
+                local_pts = nfp_data.get('local_points')
+                if local_pts is not None and len(local_pts):
+                    pts = local_pts.copy()
+                    if abs(placed_angle) > 1e-9:
+                        a = math.radians(placed_angle)
+                        ca, sa = math.cos(a), math.sin(a)
+                        pts = pts @ np.array([[ca, -sa], [sa, ca]], dtype=np.float64).T
+                    pts[:, 0] += cent.x
+                    pts[:, 1] += cent.y
+                    points.extend(Point(float(r[0]), float(r[1])) for r in pts)
+                else:
+                    points.extend(self._discretize_edge(translated.exterior))
+                    for interior in translated.interiors:
+                        points.extend(self._discretize_edge(interior))
 
         dt_total = (time.perf_counter() - t0_total) * 1000
         with self._perf_lock:
@@ -296,7 +281,18 @@ class MinkowskiEngine:
             self.log(f"[PERF] get_global_nfp_for angle={angle:.1f} "
                      f"hits={n_hits} misses={n_misses} "
                      f"total={dt_total:.1f}ms candidates={len(points)}")
-        return {'polygon': polygon, 'points': points, 'per_part_nfps': per_part_nfps}
+        placed_bdry_parts = []
+        for p in sheet.parts:
+            poly_abs = (rotate(p.shape.original_polygon, p.angle, origin='centroid')
+                        if abs(p.angle) > 1e-9 else p.shape.original_polygon)
+            sample_step = max(self.step_size, poly_abs.exterior.length / 8)
+            placed_bdry_parts.append(
+                self._discretize_ring_np(poly_abs.exterior, sample_step).astype(np.float32)
+            )
+        placed_boundary_pts = (np.concatenate(placed_bdry_parts, axis=0)
+                               if placed_bdry_parts else np.empty((0, 2), dtype=np.float32))
+        return {'polygon': polygon, 'points': points, 'per_part_nfps': per_part_nfps,
+                'placed_boundary_pts': placed_boundary_pts}
 
     # Maximum exterior vertices to use when decomposing a shape for GPU NFP.
     # Triangulation produces O(N) triangles → O(N²) shell pairs for identical shapes.
@@ -563,7 +559,6 @@ class MinkowskiEngine:
 
         import numpy as np
         best_overall = {'metric': float('inf')}
-        dir_x, dir_y = self.search_direction
         t0_score = time.perf_counter()
         total_candidates = sum(len(pts) for _, pts, _ in rotation_candidates)
         if self.verbose:
@@ -621,16 +616,22 @@ class MinkowskiEngine:
                     bounds_results
                 )
             
-            n_scored = 0
-            for i, pt in enumerate(points):
-                if results[i] == 1: continue # NFP collision
-                if bounds_results[i] == 0: continue # Out of bounds
-                
-                # If we're here, it passed both GPU checks
-                metric = pt.x * (-dir_x) + pt.y * (-dir_y)
+            valid = (results == 0) & (bounds_results == 1)
+            n_scored = int(valid.sum())
+            if n_scored > 0:
+                gx, gy = self.search_direction
+                # Project each candidate onto gravity axis; lower (more negative) = better
+                gravity_score = pts_np[:, 0] * gx + pts_np[:, 1] * gy
+                scores = np.where(valid, gravity_score, np.inf)
+                best_idx = int(np.argmin(scores))
+                metric = float(scores[best_idx])
                 if metric < best_overall['metric']:
-                    best_overall = {'x': pt.x, 'y': pt.y, 'angle': angle, 'metric': metric}
-                n_scored += 1
+                    best_overall = {
+                        'x': float(pts_np[best_idx, 0]),
+                        'y': float(pts_np[best_idx, 1]),
+                        'angle': angle,
+                        'metric': metric,
+                    }
             
             if self.verbose and n_scored > 0:
                 self.log(f"GPU scored {n_scored} candidates in batch at angle {angle}")
@@ -663,7 +664,13 @@ class MinkowskiEngine:
                             elif ifp.geom_type == 'MultiPolygon':
                                 for p in ifp.geoms: nfp_interiors.append(p.exterior)
             master_nfp = Polygon(nfp_exterior.exterior, nfp_interiors) if nfp_exterior and nfp_exterior.area > 0 else None
-            nfp_data = {"polygon": master_nfp} if master_nfp else {}
+            if master_nfp:
+                rings = [master_nfp.exterior] + list(master_nfp.interiors)
+                pts_parts = [self._discretize_ring_np(r, self.step_size) for r in rings]
+                local_pts = np.concatenate(pts_parts, axis=0) if pts_parts else np.empty((0, 2), dtype=np.float64)
+                nfp_data = {"polygon": master_nfp, "local_points": local_pts}
+            else:
+                nfp_data = {}
         except Exception as e:
             self.log(f"Error calculating NFP for {cache_key}: {e}")
             nfp_data = {'error': str(e)}
@@ -721,12 +728,28 @@ class MinkowskiEngine:
         with self._perf_lock:
             self._perf_stats = {'cache_hits': 0, 'cache_misses': 0, 'nfp_compute_ms': 0.0}
 
+    @staticmethod
+    def _discretize_ring_np(ring, step_size):
+        """Vectorized ring discretisation. Returns (N, 2) float64 array.
+
+        Replaces the Shapely interpolate() loop — samples at equal arc-length
+        intervals using numpy cumulative distance + np.interp.
+        """
+        coords = np.array(ring.coords, dtype=np.float64)
+        diffs = np.diff(coords, axis=0)
+        seg_lens = np.hypot(diffs[:, 0], diffs[:, 1])
+        cum_dist = np.empty(len(seg_lens) + 1, dtype=np.float64)
+        cum_dist[0] = 0.0
+        np.cumsum(seg_lens, out=cum_dist[1:])
+        total = cum_dist[-1]
+        if total < step_size:
+            return coords[:1]
+        n = max(2, int(total / step_size))
+        sample_dists = np.linspace(0.0, total, n, endpoint=False)
+        xs = np.interp(sample_dists, cum_dist, coords[:, 0])
+        ys = np.interp(sample_dists, cum_dist, coords[:, 1])
+        return np.column_stack([xs, ys])
+
     def _discretize_edge(self, line):
-        points = [Point(line.coords[0])]
-        length = line.length
-        if length > self.step_size:
-            num_segments = int(length / self.step_size)
-            for i in range(1, num_segments):
-                points.append(line.interpolate(float(i) / num_segments, normalized=True))
-        points.append(Point(line.coords[-1]))
-        return points
+        pts = self._discretize_ring_np(line, self.step_size)
+        return [Point(float(r[0]), float(r[1])) for r in pts]
