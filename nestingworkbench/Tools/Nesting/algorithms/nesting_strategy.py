@@ -6,6 +6,7 @@ import copy
 from datetime import datetime
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import numpy as np
 from shapely.geometry import Polygon, Point
 
 from shapely.prepared import prep
@@ -79,7 +80,7 @@ class PlacementOptimizer:
                 if nfp_entry is None:
                     continue
                 candidates = self._get_candidates_for_rotation(angle, part, sheet, nfp_entry=nfp_entry)
-                if candidates:
+                if len(candidates):
                     all_rotation_candidates.append((angle, candidates, nfp_entry))
             dt_nfp = (_time.perf_counter() - t0_nfp) * 1000
             self.log(f"[PERF] find_best_placement '{getattr(part, 'id', '?')}': "
@@ -161,9 +162,9 @@ class PlacementOptimizer:
 
         # 2. Generate Candidates — pass the already-computed nfp_entry to avoid a second call
         ext_cands = self._get_candidates_for_rotation(angle, part, sheet, nfp_entry=nfp_entry)
-        if not ext_cands:
+        if not len(ext_cands):
             return {'metric': float('inf')}
-            
+
         rotated_poly = rotate(part.original_polygon, angle, origin='centroid')
         if not rotated_poly: return {'metric': float('inf')}
 
@@ -171,27 +172,27 @@ class PlacementOptimizer:
         best = {'metric': float('inf')}
         rejected_nfp = 0
         rejected_bounds = 0
-        
+
         centroid = rotated_poly.centroid
 
-        valid_pts = []
-        for pt in ext_cands:
-            if prepared_nfp and prepared_nfp.contains(pt):
+        valid_rows = []
+        for row in ext_cands:
+            x, y = float(row[0]), float(row[1])
+            if prepared_nfp and prepared_nfp.contains(Point(x, y)):
                 rejected_nfp += 1
                 continue
-            dx, dy = pt.x - centroid.x, pt.y - centroid.y
+            dx, dy = x - centroid.x, y - centroid.y
             if not bin_polygon.contains(translate(rotated_poly, xoff=dx, yoff=dy)):
                 rejected_bounds += 1
                 continue
-            valid_pts.append(pt)
+            valid_rows.append((x, y))
 
-        if valid_pts:
-            import numpy as np
-            pts_arr = np.array([[p.x, p.y] for p in valid_pts], dtype=np.float64)
-            valid_mask = np.ones(len(valid_pts), dtype=bool)
+        if valid_rows:
+            pts_arr = np.array(valid_rows, dtype=np.float64)
+            valid_mask = np.ones(len(valid_rows), dtype=bool)
             best_idx, metric = MinkowskiEngine.score_gravity(pts_arr, valid_mask, direction)
             if best_idx is not None:
-                best = {'x': valid_pts[best_idx].x, 'y': valid_pts[best_idx].y,
+                best = {'x': pts_arr[best_idx, 0], 'y': pts_arr[best_idx, 1],
                         'angle': angle, 'metric': metric}
         
         # Notify better result found
@@ -211,31 +212,34 @@ class PlacementOptimizer:
         """Helper to compute candidate points for a specific rotation.
 
         Pass a pre-computed nfp_entry to avoid a redundant get_global_nfp_for call.
+        Returns (N, 2) float32 numpy array.
         """
         if nfp_entry is None:
             nfp_entry = self.engine.get_global_nfp_for(part, angle, sheet)
         if nfp_entry is None:
-            return []
-            
+            return np.empty((0, 2), dtype=np.float32)
+
         rotated_poly = rotate(part.original_polygon, angle, origin='centroid')
-        if not rotated_poly: return []
+        if not rotated_poly:
+            return np.empty((0, 2), dtype=np.float32)
 
         min_x, min_y, max_x, max_y = rotated_poly.bounds
-        ext_cands = []
         w_bin, h_bin = self.engine.bin_width, self.engine.bin_height
-        
-        # Essential placement points
-        ext_cands.append(Point(-min_x, -min_y)) 
-        ext_cands.append(Point(w_bin - max_x, -min_y))
-        ext_cands.append(Point(-min_x, h_bin - max_y))
-        ext_cands.append(Point(w_bin - max_x, h_bin - max_y))
 
-        # NFP Boundary Candidates
-        for p in nfp_entry['points']:
-             if 0 <= p.x <= w_bin and 0 <= p.y <= h_bin:
-                 ext_cands.append(p)
-                 
-        return ext_cands
+        corners = np.array([
+            [-min_x,        -min_y       ],
+            [w_bin - max_x, -min_y       ],
+            [-min_x,        h_bin - max_y],
+            [w_bin - max_x, h_bin - max_y],
+        ], dtype=np.float32)
+
+        nfp_pts = nfp_entry['points']  # (N, 2) float32
+        if len(nfp_pts):
+            mask = ((nfp_pts[:, 0] >= 0) & (nfp_pts[:, 0] <= w_bin) &
+                    (nfp_pts[:, 1] >= 0) & (nfp_pts[:, 1] <= h_bin))
+            filtered = nfp_pts[mask]
+            return np.vstack([corners, filtered]) if len(filtered) else corners
+        return corners
 
 
 class Nester:

@@ -141,7 +141,7 @@ class MinkowskiEngine:
         """
         part_label = part_to_place.source_freecad_object.Label
         polygon = Polygon()
-        points = []
+        _pt_arrays = []  # Collect (N,2) float32 arrays; global-deduped at the end
         per_part_nfps = []
         t0_total = time.perf_counter()
         n_hits = 0
@@ -236,12 +236,13 @@ class MinkowskiEngine:
                     grid = max(1.0, self.step_size)
                     rounded = np.round(pts_raw / grid).astype(np.int32)
                     _, unique_idx = np.unique(rounded, axis=0, return_index=True)
-                    pts_unique = pts_raw[unique_idx]
-                    points.extend(Point(float(c[0]), float(c[1])) for c in pts_unique)
+                    _pt_arrays.append(pts_raw[unique_idx].astype(np.float32))
 
                 # Add IFP void boundary edges as placement candidates (void nesting)
                 for piece in part_holes:
-                    points.extend(self._discretize_edge(piece.exterior))
+                    hole_pts = self._discretize_ring_np(piece.exterior, self.step_size)
+                    if len(hole_pts):
+                        _pt_arrays.append(hole_pts.astype(np.float32))
 
                 dt_xform = (time.perf_counter() - t_xform) * 1000
                 if self.verbose and dt_xform > 20.0:
@@ -268,32 +269,33 @@ class MinkowskiEngine:
                         pts = pts @ np.array([[ca, -sa], [sa, ca]], dtype=np.float64).T
                     pts[:, 0] += cent.x
                     pts[:, 1] += cent.y
-                    points.extend(Point(float(r[0]), float(r[1])) for r in pts)
+                    _pt_arrays.append(pts.astype(np.float32))
                 else:
-                    points.extend(self._discretize_edge(translated.exterior))
+                    ring_pts = self._discretize_ring_np(translated.exterior, self.step_size)
+                    if len(ring_pts):
+                        _pt_arrays.append(ring_pts.astype(np.float32))
                     for interior in translated.interiors:
-                        points.extend(self._discretize_edge(interior))
+                        int_pts = self._discretize_ring_np(interior, self.step_size)
+                        if len(int_pts):
+                            _pt_arrays.append(int_pts.astype(np.float32))
 
         dt_total = (time.perf_counter() - t0_total) * 1000
         with self._perf_lock:
             self._perf_stats['cache_hits'] += n_hits
             self._perf_stats['cache_misses'] += n_misses
+        if _pt_arrays:
+            all_pts = np.concatenate(_pt_arrays, axis=0)
+            grid = max(1.0, self.step_size)
+            rounded = np.round(all_pts / grid).astype(np.int32)
+            _, unique_idx = np.unique(rounded, axis=0, return_index=True)
+            points = all_pts[unique_idx]
+        else:
+            points = np.empty((0, 2), dtype=np.float32)
         if self.verbose and (n_misses > 0 or dt_total > 10.0):
             self.log(f"[PERF] get_global_nfp_for angle={angle:.1f} "
                      f"hits={n_hits} misses={n_misses} "
                      f"total={dt_total:.1f}ms candidates={len(points)}")
-        placed_bdry_parts = []
-        for p in sheet.parts:
-            poly_abs = (rotate(p.shape.original_polygon, p.angle, origin='centroid')
-                        if abs(p.angle) > 1e-9 else p.shape.original_polygon)
-            sample_step = max(self.step_size, poly_abs.exterior.length / 8)
-            placed_bdry_parts.append(
-                self._discretize_ring_np(poly_abs.exterior, sample_step).astype(np.float32)
-            )
-        placed_boundary_pts = (np.concatenate(placed_bdry_parts, axis=0)
-                               if placed_bdry_parts else np.empty((0, 2), dtype=np.float32))
-        return {'polygon': polygon, 'points': points, 'per_part_nfps': per_part_nfps,
-                'placed_boundary_pts': placed_boundary_pts}
+        return {'polygon': polygon, 'points': points, 'per_part_nfps': per_part_nfps}
 
     # Maximum exterior vertices to use when decomposing a shape for GPU NFP.
     # Triangulation produces O(N) triangles → O(N²) shell pairs for identical shapes.
@@ -586,9 +588,7 @@ class MinkowskiEngine:
                      f"{total_candidates} total candidates")
 
         for angle, points, nfp_entry in rotation_candidates:
-            
-            # NEW — per-part collision evaluation
-            pts_np = np.array([[p.x, p.y] for p in points], dtype=np.float32)
+            pts_np = points if points.dtype == np.float32 else points.astype(np.float32)
             per_part = nfp_entry.get('per_part_nfps', [])
 
             if not per_part:
