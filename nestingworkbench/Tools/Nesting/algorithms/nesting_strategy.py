@@ -169,36 +169,30 @@ class PlacementOptimizer:
 
         # 3. Score Candidates
         best = {'metric': float('inf')}
-        valid_count = 0
         rejected_nfp = 0
         rejected_bounds = 0
         
         centroid = rotated_poly.centroid
-        dir_x, dir_y = direction
 
-        def score_point(pt):
-             nonlocal rejected_nfp, rejected_bounds
-             # A. Check NFP Collision (Fastest if cached)
-             if prepared_nfp and prepared_nfp.contains(pt): 
-                 rejected_nfp += 1
-                 return None
-                 
-             dx, dy = pt.x - centroid.x, pt.y - centroid.y
-             
-             # B. Check Bounds
-             test_poly = translate(rotated_poly, xoff=dx, yoff=dy)
-             if not bin_polygon.contains(test_poly):
-                 rejected_bounds += 1
-                 return None
- 
-             return pt.x * (-dir_x) + pt.y * (-dir_y)
- 
+        valid_pts = []
         for pt in ext_cands:
-            valid_metric = score_point(pt)
-            if valid_metric is not None:
-                valid_count += 1
-                if valid_metric < best['metric']:
-                    best = {'x': pt.x, 'y': pt.y, 'angle': angle, 'metric': valid_metric}
+            if prepared_nfp and prepared_nfp.contains(pt):
+                rejected_nfp += 1
+                continue
+            dx, dy = pt.x - centroid.x, pt.y - centroid.y
+            if not bin_polygon.contains(translate(rotated_poly, xoff=dx, yoff=dy)):
+                rejected_bounds += 1
+                continue
+            valid_pts.append(pt)
+
+        if valid_pts:
+            import numpy as np
+            pts_arr = np.array([[p.x, p.y] for p in valid_pts], dtype=np.float64)
+            valid_mask = np.ones(len(valid_pts), dtype=bool)
+            best_idx, metric = MinkowskiEngine.score_gravity(pts_arr, valid_mask, direction)
+            if best_idx is not None:
+                best = {'x': valid_pts[best_idx].x, 'y': valid_pts[best_idx].y,
+                        'angle': angle, 'metric': metric}
         
         # Notify better result found
         if self.trial_callback and best.get('x') is not None:

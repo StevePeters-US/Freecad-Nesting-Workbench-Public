@@ -113,26 +113,11 @@ class BaseNester(object):
         raise NotImplementedError
 
     def _evaluate_placement(self, shape, direction):
-        """
-        Evaluates a placement based on the centroid's position in gravity direction.
-        Decouples vertical progress from the side-packing tie-breaker.
-        """
+        """Score placement by distance along gravity direction. Higher = better."""
         center = shape.centroid
         if not center:
             return -float('inf')
-            
-        # 1. Primary score: distance along gravity direction (MAXIMIZE)
-        # (e.g. if direction is (0,-1), this yields -y. Highest score at lowest y)
-        primary_score = center.x * direction[0] + center.y * direction[1]
-        
-        # 2. Tie-breaker: perpendicular progress (STRICTLY SIDE-PACKING)
-        # We pack towards the origin (0,0) by penalizing perpendicular distance.
-        # This prevents horizontal drift from interfering with vertical fitness.
-        perp = (-direction[1], direction[0])
-        dist_perp = center.x * perp[0] + center.y * perp[1]
-        tie_breaker = -abs(dist_perp) * 0.0001
-        
-        return primary_score + tie_breaker
+        return center.x * direction[0] + center.y * direction[1]
 
     def _anneal_part(self, part, sheet, direction, rotate_enabled=True, translate_enabled=True):
         """

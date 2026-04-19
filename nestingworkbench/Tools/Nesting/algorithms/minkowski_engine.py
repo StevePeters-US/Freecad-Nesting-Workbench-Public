@@ -158,7 +158,8 @@ class MinkowskiEngine:
 
             nfp_cache_key = (
                 placed_label, part_label, relative_angle,
-                part_to_place.spacing, part_to_place.deflection, part_to_place.simplification
+                part_to_place.spacing, part_to_place.deflection, part_to_place.simplification,
+                'gpu' if self.use_gpu else 'cpu'
             )
 
             nfp_data = Shape.nfp_cache.get(nfp_cache_key)
@@ -400,7 +401,8 @@ class MinkowskiEngine:
 
                 nfp_cache_key = (
                     placed_label, part_to_place_label, relative_angle,
-                    part_to_place.spacing, part_to_place.deflection, part_to_place.simplification
+                    part_to_place.spacing, part_to_place.deflection, part_to_place.simplification,
+                    'gpu'
                 )
 
                 if nfp_cache_key not in Shape.nfp_cache:
@@ -547,6 +549,24 @@ class MinkowskiEngine:
                     nfp_holes.extend(minkowski_utils.decompose_if_needed(ifp, self.log))
         return nfp_holes
 
+    @staticmethod
+    def score_gravity(pts_np, valid, direction):
+        """Score candidates by gravity direction. Lower metric = better (furthest along direction).
+
+        pts_np: (N, 2) float array of candidate positions
+        valid:  (N,) bool mask — invalid positions get metric=inf
+        direction: (gx, gy) unit vector pointing toward preferred side
+        Returns: (best_idx, metric) or (None, inf) when no valid candidates exist.
+        """
+        import numpy as np
+        gx, gy = direction
+        scores = np.where(valid, -(pts_np[:, 0] * gx + pts_np[:, 1] * gy), np.inf)
+        best_idx = int(np.argmin(scores))
+        metric = float(scores[best_idx])
+        if not np.isfinite(metric):
+            return None, float('inf')
+        return best_idx, metric
+
     def score_candidates_gpu(self, part_to_place, rotation_candidates):
         """Calculates scores for multiple candidates using GPU PIP scoring.
 
@@ -619,13 +639,8 @@ class MinkowskiEngine:
             valid = (results == 0) & (bounds_results == 1)
             n_scored = int(valid.sum())
             if n_scored > 0:
-                gx, gy = self.search_direction
-                # Project each candidate onto gravity axis; lower (more negative) = better
-                gravity_score = pts_np[:, 0] * gx + pts_np[:, 1] * gy
-                scores = np.where(valid, gravity_score, np.inf)
-                best_idx = int(np.argmin(scores))
-                metric = float(scores[best_idx])
-                if metric < best_overall['metric']:
+                best_idx, metric = MinkowskiEngine.score_gravity(pts_np, valid, self.search_direction)
+                if best_idx is not None and metric < best_overall['metric']:
                     best_overall = {
                         'x': float(pts_np[best_idx, 0]),
                         'y': float(pts_np[best_idx, 1]),
