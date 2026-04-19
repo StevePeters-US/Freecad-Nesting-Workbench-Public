@@ -386,12 +386,11 @@ class GACoordinator:
             layout_group=best_layout.layout_group, parts_group=best_layout.parts_group, sheets=best_layout.sheets
         )
         
-        c_score = f", Contact: {best_layout.contact_score:.1f}" if hasattr(best_layout, 'contact_score') else ""
         unplaced_count = len(getattr(best_layout, 'unplaced', []) or [])
         placed_count = sum(len(s) for s in best_layout.sheets)
         msg = f"GA Complete: {best_efficiency:.1f}% efficiency, {len(best_layout.sheets)} sheets, {placed_count} placed"
         if unplaced_count: msg += f", {unplaced_count} UNPLACED"
-        msg += f"{c_score}, Time: {total_time:.2f}s"
+        msg += f", Time: {total_time:.2f}s"
         
         self._set_status(msg)
         FreeCAD.Console.PrintMessage(f"{msg}\n")

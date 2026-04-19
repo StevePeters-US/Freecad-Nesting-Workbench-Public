@@ -35,7 +35,6 @@ class Layout:
         self.fitness = float('inf')
         self.efficiency = 0.0
         self.genes = []                   # (part_id, angle) tuples - the "DNA" of this layout
-        self.contact_score = 0.0          # How much parts touch each other
     
     @property
     def name(self):
@@ -225,69 +224,10 @@ class LayoutManager:
             if found_valid:
                 fitness += (max_x - min_x) * (max_y - min_y)
         
-        # Contact score: reward parts that touch each other
-        # Lower fitness = better, so we subtract contact bonus
-        contact_bonus = self._calculate_contact_score(layout)
-        fitness -= contact_bonus
-        
         layout.fitness = fitness
         layout.efficiency = efficiency
-        layout.contact_score = contact_bonus
-        
+
         return fitness, efficiency
-    
-    def _calculate_contact_score(self, layout) -> float:
-        """
-        Calculates the total contact score between parts in the layout.
-        
-        The score represents the total length (or normalized area) of contact
-        between part boundaries. A higher score indicates better packing density
-        as parts are more tightly "tucked" against each other.
-        
-        Returns:
-            float: The cumulative contact score (higher is better).
-        """
-        try:
-            from shapely.ops import unary_union
-        except ImportError:
-            return 0.0
-        
-        total_contact = 0.0
-        buffer_distance = 0.5  # Small buffer to detect "almost touching"
-        
-        for sheet in layout.sheets:
-            # Get parts that have a valid polygon (Shape.polygon, not bounds_polygon)
-            parts = [p for p in sheet.parts if hasattr(p, 'shape') and p.shape and p.shape.polygon]
-            
-            for i, part_a in enumerate(parts):
-                poly_a = part_a.shape.polygon
-                if not poly_a or poly_a.is_empty:
-                    continue
-                buffered_a = poly_a.buffer(buffer_distance)
-                
-                for part_b in parts[i+1:]:
-                    poly_b = part_b.shape.polygon
-                    if not poly_b or poly_b.is_empty:
-                        continue
-                    
-                    # Check if they touch or are very close
-                    if buffered_a.intersects(poly_b):
-                        # Calculate contact length (intersection of boundaries)
-                        try:
-                            intersection = buffered_a.intersection(poly_b)
-                            if intersection.is_empty:
-                                continue
-                            # Use length of intersection boundary as contact score
-                            if hasattr(intersection, 'length'):
-                                total_contact += intersection.length
-                            elif hasattr(intersection, 'area'):
-                                # For area-based contact, use sqrt to normalize
-                                total_contact += intersection.area ** 0.5
-                        except Exception:
-                            # Simple fallback: just count the contact
-                            total_contact += 10.0
-        
-        return total_contact
     
     def create_ga_population(self, master_shapes_map, quantities, ui_params, 
                              population_size, rotation_steps=1, verbose=False) -> list:
