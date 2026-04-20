@@ -63,19 +63,11 @@ class PlacementOptimizer:
         # Batch evaluate or parallel evaluate
         if self.engine.use_gpu:
             import time as _time
-            t0_fbp = _time.perf_counter()
-            # 1. Collect candidates for ALL rotations
             all_rotation_candidates = []
             angles = [i * (360.0 / part_rotation_steps) for i in range(part_rotation_steps)]
 
-            # Precompute NFPs in batch on GPU
-            t0_pre = _time.perf_counter()
-            self.engine.precompute_nfp_batch(part, angles, sheet)
-            dt_pre = (_time.perf_counter() - t0_pre) * 1000
-
             t0_nfp = _time.perf_counter()
             for angle in angles:
-                # Call get_global_nfp_for ONCE and pass it to both helpers
                 nfp_entry = self.engine.get_global_nfp_for(part, angle, sheet)
                 if nfp_entry is None:
                     continue
@@ -84,7 +76,7 @@ class PlacementOptimizer:
                     all_rotation_candidates.append((angle, candidates, nfp_entry))
             dt_nfp = (_time.perf_counter() - t0_nfp) * 1000
             self.log(f"[PERF] find_best_placement '{getattr(part, 'id', '?')}': "
-                     f"precompute={dt_pre:.0f}ms nfp_assembly={dt_nfp:.0f}ms "
+                     f"nfp_assembly={dt_nfp:.0f}ms "
                      f"(placed={len(sheet.parts)} angles={len(angles)})")
 
             # 2. Batch score on GPU
@@ -392,11 +384,7 @@ class Nester:
             if not quiet and self.part_end_callback:
                 self.part_end_callback(part, placed)
 
-            # Submit background NFP pre-computation for remaining parts.
-            # GPU mode: skip — precompute_nfp_batch() already handles this via a single
-            # batched kernel call at the start of each find_best_placement. Background
-            # per-pair tasks would compete for _kernel_lock and slow the foreground down.
-            if placed and i < total_parts - 1 and not self.engine.use_gpu:
+            if placed and i < total_parts - 1:
                 self._submit_precomputation(sheets, current_parts[i+1:])
 
         # Shut down precompute pool (don't wait for pending futures)
@@ -486,13 +474,7 @@ class Nester:
                         if cache_key in Shape.nfp_cache:
                             continue
                     
-                    # Fire-and-forget: compute in background, result goes to cache.
-                    # Dispatch to GPU or CPU path to match the engine configuration.
-                    nfp_fn = (
-                        self.engine._calculate_and_cache_nfp_gpu
-                        if self.engine.use_gpu
-                        else self.engine._calculate_and_cache_nfp
-                    )
+                    nfp_fn = self.engine._calculate_and_cache_nfp
                     self._precompute_pool.submit(
                         nfp_fn,
                         placed.shape, 0.0, remaining, relative_angle, cache_key
