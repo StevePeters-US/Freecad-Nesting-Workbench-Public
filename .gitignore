@@ -2,3 +2,6 @@
 *.blend1
 *.FCBak
 *.pyc
+.venv/
+__pycache__/
+.pytest_cache/
