@@ -719,18 +719,21 @@ class ManualNesterToolObserver:
                 self.selected_obj.Placement = self.pre_drag_placements[self.selected_obj].copy()
 
     def _auto_rotate(self, drag_delta):
-        """Rotate the dragged part toward the weighted-average centroid of nearby parts."""
+        """Rotate the dragged part toward the weighted-average centroid of nearby parts.
+
+        Returns True if rotation was applied (caller should invalidate cache).
+        """
         MIN_ANGLE_DEG = 0.1
         SMOOTH = 0.20
         SPEED_SCALE_MM = 5.0
 
         dragged_info = self._get_obj_phys_info(self.selected_obj)
-        if not dragged_info: return
+        if not dragged_info: return False
         dragged_center, _, _ = dragged_info
 
         # 1. Centroid Attraction
         centroid_delta_deg = self._get_centroid_attraction_delta(dragged_center, drag_delta)
-        if centroid_delta_deg is None: return
+        if centroid_delta_deg is None: return False
 
         # 2. Sheet-edge fitting
         edge_delta_deg, edge_weight = self._get_edge_alignment_delta(self.selected_obj)
@@ -741,7 +744,7 @@ class ManualNesterToolObserver:
         else:
             delta_deg = centroid_delta_deg
 
-        if abs(delta_deg) < MIN_ANGLE_DEG: return
+        if abs(delta_deg) < MIN_ANGLE_DEG: return False
 
         # 4. Apply smooth incremental rotation
         speed_scale = min(1.0, drag_delta.Length / SPEED_SCALE_MM)
@@ -752,6 +755,8 @@ class ManualNesterToolObserver:
             new_placement = self.selected_obj.Placement.copy()
             new_placement.Rotation = rot.multiply(self.selected_obj.Placement.Rotation)
             self.selected_obj.Placement = new_placement
+            return True
+        return False
 
     def _get_centroid_attraction_delta(self, dragged_center, drag_delta):
         """Calculates rotation delta to point the centroid toward nearby parts and drag direction."""
@@ -984,10 +989,11 @@ class ManualNesterToolObserver:
                 )
 
         self._set_part_highlight(self.selected_obj, not valid)
-        if valid and self.auto_rotate_enabled:
-            if self._physics_last_base:
-                drag_delta = self.selected_obj.Placement.Base - self._physics_last_base
-                self._auto_rotate(drag_delta)
+        if self.auto_rotate_enabled and self._physics_last_base:
+            drag_delta = self.selected_obj.Placement.Base - self._physics_last_base
+            if self._auto_rotate(drag_delta):
+                # Rotation changed the bbox — force a full re-prime next tick.
+                self.collision_resolver.invalidate(self.selected_obj)
 
     # ------------------------------------------------------------------
     # Coin3D displacement nodes for physics-pushed parts
