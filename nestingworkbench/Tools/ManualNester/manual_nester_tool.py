@@ -14,6 +14,160 @@ from .physics_engine import PhysicsEngine
 from .collision_resolver import CollisionResolver
 from .input_manager import InputManager
 
+
+def _compute_physics_frame(
+    working_cache,
+    working_base,
+    selected_key,
+    parts_keys,
+    drag_center,
+    drag_len,
+    sheet_bbox,
+    physics_params,
+):
+    """Pure-Python physics frame computation — no FreeCAD or Coin3D calls.
+
+    Runs displacement math + all collision resolution on snapshot data.
+    Safe to call from any thread.
+
+    Args:
+        working_cache: mutable {key: {'bbox': {...}, 'poly': ...}} — modified in-place
+        working_base:  mutable {key: (x, y)} — modified in-place
+        selected_key:  integer id-key of the dragged object
+        parts_keys:    list of integer id-keys for the other sheet parts
+        drag_center:   (cx, cy) float tuple — center of dragged part
+        drag_len:      float — magnitude of drag delta this frame
+        sheet_bbox:    (xmin, xmax, ymin, ymax) or None
+        physics_params:(radius, strength, curve_exponent)
+
+    Returns:
+        dict with keys:
+            'valid'            — bool, False if placement is impossible
+            'displaced_keys'   — set of keys that moved this frame
+            'final_positions'  — {key: (x, y)} absolute positions for all displaced keys
+    """
+    from .collision_resolver import CollisionResolver
+    from .physics_engine import PhysicsEngine
+
+    radius, strength, curve_exponent = physics_params
+    engine = PhysicsEngine(radius=radius, curve_exponent=curve_exponent, strength=strength)
+
+    resolver = CollisionResolver()
+    resolver._cache = working_cache
+    resolver._base_cache = working_base
+
+    # Build (key, center_tuple) list from cache for displacement computation.
+    parts_centers = []
+    for key in parts_keys:
+        entry = working_cache.get(key)
+        if entry:
+            bb = entry['bbox']
+            parts_centers.append((key, (bb['center_x'], bb['center_y'])))
+
+    displacements = engine.compute_raw(drag_center, drag_len, parts_centers)
+
+    # Apply displacements; snapshot pre-frame positions for revert.
+    pre_frame = {}
+    displaced_keys = []
+    for key, (dx, dy) in displacements:
+        if abs(dx) > 0.0001 or abs(dy) > 0.0001:
+            cached = working_base.get(key)
+            pre_frame[key] = cached if cached else (0.0, 0.0)
+            resolver._translate_key(key, dx, dy)
+            displaced_keys.append(key)
+
+    total_peers = len(parts_centers)
+    peers_in_range = len(displaced_keys)
+
+    if not displaced_keys:
+        return {
+            'valid': True, 'displaced_keys': set(), 'final_positions': {},
+            'total_peers': total_peers, 'peers_in_range': peers_in_range,
+        }
+
+    displaced_set = set(displaced_keys)
+    static_keys = [k for k in parts_keys if k not in displaced_set]
+
+    # Initial separation of each displaced part from the dragged part only.
+    # We deliberately do NOT separate against statics here so that displaced parts
+    # can overlap statics — those overlaps are what we detect for cascade promotion.
+    for key in list(displaced_set):
+        resolver.separate_overlapping_by_keys(key, [selected_key], max_iterations=2)
+        if sheet_bbox:
+            resolver.clamp_to_sheet_by_key(key, *sheet_bbox)
+
+    # Resolution + cascade loop.
+    # Cascade works by detecting displaced→static overlaps BEFORE any separation from
+    # statics, then promoting overlapping statics to displaced and resolving bi-directionally.
+    for _pass in range(12):
+        # Resolve overlaps among currently displaced parts (STRtree-accelerated).
+        pairs = CollisionResolver.find_overlapping_pairs(list(displaced_set), working_cache)
+        for key_a, key_b in pairs:
+            resolver.resolve_bi_by_keys(key_a, key_b)
+
+        # Cascade: check for displaced→static overlaps within the influence radius.
+        # Parts outside the radius are treated as immovable walls — this prevents
+        # cascade chains from propagating far beyond the dragged part.
+        dc_x, dc_y = drag_center
+        radius_sq = radius * radius
+        newly_promoted = []
+        for k in static_keys:
+            if not resolver.overlaps_any_by_keys(k, list(displaced_set)):
+                continue
+            entry = working_cache.get(k)
+            if not entry:
+                continue
+            bb = entry['bbox']
+            ddx, ddy = bb['center_x'] - dc_x, bb['center_y'] - dc_y
+            if ddx * ddx + ddy * ddy <= radius_sq:
+                newly_promoted.append(k)
+
+        if not newly_promoted and not pairs:
+            break
+
+        # Promote overlapping statics: record pre-frame position, add to displaced set.
+        for k in newly_promoted:
+            pre_frame[k] = working_base.get(k, (0.0, 0.0))
+            displaced_set.add(k)
+            static_keys.remove(k)
+
+        # Bi-directionally resolve each newly promoted part against all displaced
+        # (this is what actually moves them away from the parts that hit them).
+        for new_key in newly_promoted:
+            for other_key in list(displaced_set):
+                if other_key != new_key:
+                    resolver.resolve_bi_by_keys(new_key, other_key)
+
+        # Clamp all displaced to sheet and keep them off the dragged part.
+        if sheet_bbox:
+            for key in displaced_set:
+                resolver.clamp_to_sheet_by_key(key, *sheet_bbox)
+        for key in displaced_set:
+            resolver.separate_overlapping_by_keys(key, [selected_key], max_iterations=1)
+
+    # Validate: any displaced part still overlapping dragged or remaining statics is impossible.
+    placement_valid = True
+    for key in displaced_set:
+        neighbours = [selected_key] + static_keys + [k for k in displaced_set if k != key]
+        if resolver.overlaps_any_by_keys(key, neighbours):
+            placement_valid = False
+            break
+
+    if not placement_valid:
+        # Return best-effort pushed positions without reverting displaced parts.
+        # valid=False tells the main thread to revert/highlight the dragged part.
+        final_positions = {key: working_base.get(key, (0.0, 0.0)) for key in displaced_set}
+        return {
+            'valid': False, 'displaced_keys': displaced_set, 'final_positions': final_positions,
+            'total_peers': total_peers, 'peers_in_range': peers_in_range,
+        }
+
+    final_positions = {key: working_base.get(key, (0.0, 0.0)) for key in displaced_set}
+    return {
+        'valid': True, 'displaced_keys': displaced_set, 'final_positions': final_positions,
+        'total_peers': total_peers, 'peers_in_range': peers_in_range,
+    }
+
 try:
     from pivy import coin
 except ImportError:
@@ -47,6 +201,23 @@ class ManualNesterToolObserver:
         self.auto_rotate_enabled = False
         self.obj_to_sheet = {} # Track which sheet each object belongs to
         self._drag_active_sheet = None # Sheet the cursor was last over during drag
+        self._dragged_original_color = None  # Saved ShapeColor for invalid-placement feedback
+        self._pre_frame_dragged_pl = None  # Placement of dragged part before this frame's move
+
+        # Physics tick rate — decoupled from mouse event frequency
+        self.physics_tick_rate = 30  # Hz
+        self._physics_timer = None
+        self._physics_last_base = None  # dragged part position when physics last ran
+        self._pending_physics_future = None
+        from concurrent.futures import ThreadPoolExecutor
+        self._physics_executor = ThreadPoolExecutor(max_workers=1)
+
+        # Coin3D displacement nodes for physics-displaced parts.
+        # During drag each displaced part gets a SoTranslation injected at index 0
+        # of its ViewObject.RootNode so we avoid writing obj.Placement every tick.
+        # On drop, _commit_displaced_placements() batch-writes and removes them.
+        self._coin_disp_nodes = {}   # id(obj) -> (SoTranslation, obj)
+        self._coin_disp_starts = {}  # id(obj) -> (start_x, start_y)
 
         # --- Input Manager ---
         self.input = InputManager(view)
@@ -63,16 +234,19 @@ class ManualNesterToolObserver:
         # Connect UI signals
         if hasattr(self.panel_manager, 'form'):
             ui = self.panel_manager.form
-            # Initial sync
+            # Initial sync from advanced controls
             self.physics_engine.radius = ui.radius_spin.value()
             self.physics_engine.curve_exponent = [1.0, 2.0, 3.0][ui.curve_dropdown.currentIndex()]
             self.physics_engine.strength = ui.strength_spin.value()
-            self.physics_enabled = ui.physics_enabled_cb.isChecked()
+            # Derive initial mode from radio state
+            self._sync_mode_from_ui(ui)
 
-            # Signal connections
-            ui.physics_enabled_cb.stateChanged.connect(
-                lambda state: setattr(self, 'physics_enabled', bool(state))
-            )
+            # Mode radio buttons
+            ui.radio_physics.toggled.connect(lambda _: self._sync_mode_from_ui(ui))
+            ui.radio_valid.toggled.connect(lambda _: self._sync_mode_from_ui(ui))
+            ui.radio_autorotate.toggled.connect(lambda _: self._sync_mode_from_ui(ui))
+
+            # Advanced physics controls
             ui.radius_spin.valueChanged.connect(
                 lambda val: setattr(self.physics_engine, 'radius', val)
             )
@@ -81,10 +255,6 @@ class ManualNesterToolObserver:
             )
             ui.strength_spin.valueChanged.connect(
                 lambda val: setattr(self.physics_engine, 'strength', val)
-            )
-            self.auto_rotate_enabled = ui.auto_rotate_cb.isChecked()
-            ui.auto_rotate_cb.stateChanged.connect(
-                lambda state: setattr(self, 'auto_rotate_enabled', bool(state))
             )
 
         # 1. Infer Layout Group
@@ -122,6 +292,18 @@ class ManualNesterToolObserver:
         if self.layout_group:
             self.input.activate()
             FreeCAD.Console.PrintMessage(f"Manual Nester Activated on {self.layout_group.Label}. Drag parts to move/nest.\n")
+
+    def _sync_mode_from_ui(self, ui):
+        """Read the active radio button and set physics_enabled / auto_rotate_enabled."""
+        if ui.radio_autorotate.isChecked():
+            self.physics_enabled = True
+            self.auto_rotate_enabled = True
+        elif ui.radio_physics.isChecked():
+            self.physics_enabled = True
+            self.auto_rotate_enabled = False
+        else:  # radio_valid
+            self.physics_enabled = False
+            self.auto_rotate_enabled = False
 
     def _discover_or_create_layout(self):
         doc = FreeCAD.ActiveDocument
@@ -306,9 +488,9 @@ class ManualNesterToolObserver:
 
             if drag_delta.Length > 0.001:
                 if self.physics_enabled:
-                    self._apply_physics(drag_delta)
-                    if self.auto_rotate_enabled:
-                        self._auto_rotate(drag_delta)
+                    # Physics runs on a timer at physics_tick_rate Hz — not every mouse event.
+                    # Dragged part already moved above; timer picks up accumulated delta.
+                    self._ensure_physics_timer()
                 else:
                     self._enforce_no_overlap()
 
@@ -435,7 +617,8 @@ class ManualNesterToolObserver:
         """X or Y key toggles the axis constraint."""
         lock_pos = None
         if self.selected_obj:
-            lock_pos = self.selected_obj.Placement.Base.copy()
+            b = self.selected_obj.Placement.Base
+            lock_pos = FreeCAD.Vector(b.x, b.y, b.z)
         self.input.set_constraint(axis, lock_pos)
 
     def _on_mode_switched(self, pos):
@@ -637,82 +820,258 @@ class ManualNesterToolObserver:
                 edge_delta_deg = (raw + 90) % 180 - 90
         return edge_delta_deg, edge_weight
 
-    def _apply_physics(self, drag_delta):
-        """Push nearby parts based on proximity to the dragged part."""
-        if not self.physics_engine or not self.physics_enabled:
+    def _ensure_physics_timer(self):
+        """Start the physics timer if not already running."""
+        if self._physics_timer is not None:
+            return
+        self._physics_timer = QtCore.QTimer()
+        self._physics_timer.setInterval(max(1, int(1000 / self.physics_tick_rate)))
+        self._physics_timer.timeout.connect(self._physics_tick)
+        self._physics_timer.start()
+        self._physics_last_base = None
+
+    def _stop_physics_timer(self):
+        if self._physics_timer is not None:
+            self._physics_timer.stop()
+            self._physics_timer.deleteLater()
+            self._physics_timer = None
+        self._physics_last_base = None
+        if self._pending_physics_future is not None:
+            self._pending_physics_future.cancel()
+            self._pending_physics_future = None
+
+    def _physics_tick(self):
+        """Timer callback: snapshot state, submit worker frame, apply previous result."""
+        if not self.selected_obj or not self.physics_enabled:
             return
 
-        drag_info = self._get_obj_phys_info(self.selected_obj)
-        if not drag_info: return
-        dragged_center, _, _ = drag_info
+        # Apply the previous frame's result if the worker finished.
+        if self._pending_physics_future is not None:
+            if not self._pending_physics_future.done():
+                return  # worker still running — skip this tick
+            try:
+                result = self._pending_physics_future.result()
+                self._apply_physics_result(result)
+            except Exception as e:
+                FreeCAD.Console.PrintWarning(f"[Physics] Worker error: {e}\n")
+            self._pending_physics_future = None
 
-        # Only simulate parts on the sheet the dragged part is currently over.
-        # Use _drag_active_sheet during a drag (tracks cursor position across sheets),
-        # falling back to the registered sheet if the cursor hasn't moved over a sheet yet.
+        # Measure drag delta (FreeCAD API — main thread only).
+        current_base = self.selected_obj.Placement.Base
+        if self._physics_last_base is None:
+            self._physics_last_base = FreeCAD.Vector(current_base.x, current_base.y, current_base.z)
+            return
+        drag_delta = current_base - self._physics_last_base
+        if drag_delta.Length < 0.001:
+            return
+
+        # Bring dragged-part cache entry up to date via cheap translation.
+        if not self.collision_resolver.translate_from_placement(self.selected_obj):
+            self.collision_resolver.prime_cache([self.selected_obj])
+
+        # Prime cache for sheet peers (no-op for already-cached entries).
         dragged_sheet = self._drag_active_sheet or self.obj_to_sheet.get(self.selected_obj)
+        sheet_parts = [
+            o for o in self.original_placements
+            if o != self.selected_obj
+            and (not dragged_sheet or self.obj_to_sheet.get(o) == dragged_sheet)
+        ]
+        sheet_label = dragged_sheet.Label if dragged_sheet else 'None'
+        if not sheet_parts:
+            if getattr(self, '_physics_logged_empty_sheet', None) != dragged_sheet:
+                self._physics_logged_empty_sheet = dragged_sheet
+                FreeCAD.Console.PrintMessage(
+                    f"[Physics] No peers on sheet '{sheet_label}' — nothing to push.\n"
+                )
+        elif getattr(self, '_physics_logged_active_sheet', None) != dragged_sheet:
+            self._physics_logged_active_sheet = dragged_sheet
+            FreeCAD.Console.PrintMessage(
+                f"[Physics] Active sheet '{sheet_label}' — {len(sheet_parts)} peers, "
+                f"drag_len={drag_delta.Length:.1f}mm, radius={self.physics_engine.radius:.0f}mm.\n"
+            )
+        self.collision_resolver.prime_cache(sheet_parts)
 
-        # Collect other parts and their centers/dims
-        parts_info = []
-        for obj in self.original_placements:
-            if obj == self.selected_obj:
-                continue
-            if dragged_sheet and self.obj_to_sheet.get(obj) != dragged_sheet:
-                continue
-            info = self._get_obj_phys_info(obj)
-            if info:
-                c, w, h = info
-                parts_info.append((obj, c, w, h))
+        # Read sheet bbox while still on main thread (FreeCAD API).
+        dragged_sheet_bbox = None
+        if dragged_sheet:
+            boundary = next(
+                (c for c in dragged_sheet.Group if c.Label.startswith("Sheet_Boundary_")), None
+            )
+            if boundary and hasattr(boundary, "Shape"):
+                dragged_sheet_bbox = boundary.Shape.BoundBox
 
-        displacements = self.physics_engine.compute_displacements(
-            dragged_center, drag_delta, parts_info
+        # Snapshot and submit worker frame.
+        snapshot_args = self._snapshot_for_worker(drag_delta, sheet_parts, dragged_sheet_bbox)
+        self._pending_physics_future = self._physics_executor.submit(
+            _compute_physics_frame, *snapshot_args
         )
 
-        # Pre-build sheet boundary cache for the active sheet to avoid repeated lookups
-        def _get_sheet_boundary(sheet_group):
-            if not sheet_group:
-                return None
-            boundary = next((c for c in sheet_group.Group if c.Label.startswith("Sheet_Boundary_")), None)
-            if boundary and hasattr(boundary, "Shape") and hasattr(boundary.Shape, "BoundBox"):
-                return boundary.Shape.BoundBox
-            return None
+        b = self.selected_obj.Placement.Base
+        self._physics_last_base = FreeCAD.Vector(b.x, b.y, b.z)
 
-        dragged_sheet_bbox = _get_sheet_boundary(dragged_sheet)
+    def _snapshot_for_worker(self, drag_delta, sheet_parts, dragged_sheet_bbox):
+        """Copy collision cache to plain Python for the worker thread.
 
-        displaced_objs = []
-        for obj, displacement in displacements:
-            if displacement.Length > 0.0:
-                # M-009: Store pre-drag placement for undo if not already stored
+        Returns the positional args for _compute_physics_frame.
+        """
+        # Shallow-copy cache entries (Shapely polygons are immutable for reads).
+        working_cache = {
+            k: {'bbox': dict(v['bbox']), 'poly': v.get('poly')}
+            for k, v in self.collision_resolver._cache.items()
+        }
+        working_base = dict(self.collision_resolver._base_cache)
+
+        selected_key = id(self.selected_obj)
+        parts_keys = [id(o) for o in sheet_parts]
+
+        drag_len = drag_delta.Length
+        dragged_entry = working_cache.get(selected_key, {})
+        bb = dragged_entry.get('bbox', {})
+        drag_center = (bb.get('center_x', 0.0), bb.get('center_y', 0.0))
+
+        sheet_bbox_snap = None
+        if dragged_sheet_bbox:
+            sheet_bbox_snap = (
+                dragged_sheet_bbox.XMin, dragged_sheet_bbox.XMax,
+                dragged_sheet_bbox.YMin, dragged_sheet_bbox.YMax,
+            )
+
+        physics_params = (
+            self.physics_engine.radius,
+            self.physics_engine.strength,
+            self.physics_engine.curve_exponent,
+        )
+
+        return (working_cache, working_base, selected_key, parts_keys,
+                drag_center, drag_len, sheet_bbox_snap, physics_params)
+
+    def _apply_physics_result(self, result):
+        """Apply worker result on the main thread: update cache and sync Coin3D nodes."""
+        valid = result['valid']
+        id_to_obj = {id(o): o for o in self.original_placements}
+
+        for key, (final_x, final_y) in result['final_positions'].items():
+            obj = id_to_obj.get(key)
+            if not obj:
+                continue
+            cached = self.collision_resolver._base_cache.get(key)
+            if cached:
+                dx = final_x - cached[0]
+                dy = final_y - cached[1]
+                if abs(dx) > 0.0001 or abs(dy) > 0.0001:
+                    self.collision_resolver._translate_entry(obj, dx, dy)
+
+            if key in result['displaced_keys']:
                 if obj not in self.pre_drag_placements:
                     self.pre_drag_placements[obj] = obj.Placement.copy()
+                self._ensure_coin_disp_node(obj)
+                self._sync_coin_disp(obj)
 
-                pl = obj.Placement
-                pl.Base = pl.Base + displacement
-                obj.Placement = pl
-                displaced_objs.append(obj)
+        active_sheet = self._drag_active_sheet or self.obj_to_sheet.get(self.selected_obj)
+        if result['displaced_keys']:
+            if getattr(self, '_physics_logged_result_sheet', None) != active_sheet:
+                self._physics_logged_result_sheet = active_sheet
+                FreeCAD.Console.PrintMessage(
+                    f"[Physics] Displacing part(s) on sheet "
+                    f"'{active_sheet.Label if active_sheet else 'None'}'. valid={valid}\n"
+                )
+        elif result.get('peers_in_range', 0) == 0 and result.get('total_peers', 0) > 0:
+            if getattr(self, '_physics_logged_norange_sheet', None) != active_sheet:
+                self._physics_logged_norange_sheet = active_sheet
+                FreeCAD.Console.PrintMessage(
+                    f"[Physics] {result['total_peers']} peer(s) on sheet "
+                    f"'{active_sheet.Label if active_sheet else 'None'}' but all outside radius.\n"
+                )
 
-        if not displaced_objs:
+        self._set_part_highlight(self.selected_obj, not valid)
+        if valid and self.auto_rotate_enabled:
+            if self._physics_last_base:
+                drag_delta = self.selected_obj.Placement.Base - self._physics_last_base
+                self._auto_rotate(drag_delta)
+
+    # ------------------------------------------------------------------
+    # Coin3D displacement nodes for physics-pushed parts
+    # ------------------------------------------------------------------
+
+    def _ensure_coin_disp_node(self, obj):
+        """Inject a SoTranslation at index 0 of obj's RootNode if not already done."""
+        if not coin:
             return
+        key = id(obj)
+        if key in self._coin_disp_nodes:
+            return
+        try:
+            root = obj.ViewObject.RootNode
+            trans = coin.SoTranslation()
+            trans.translation.setValue(0, 0, 0)
+            root.insertChild(trans, 0)
+            cached = self.collision_resolver._base_cache.get(key)
+            if cached:
+                self._coin_disp_starts[key] = (cached[0], cached[1])
+            else:
+                b = obj.Placement.Base
+                self._coin_disp_starts[key] = (b.x, b.y)
+            self._coin_disp_nodes[key] = (trans, obj)
+        except Exception as e:
+            FreeCAD.Console.PrintWarning(f"[Coin3D] inject failed for {obj.Label}: {e}\n")
 
-        displaced_set = set(id(o) for o in displaced_objs)
-        # Static parts: tracked, not dragged, not displaced — these must never be pushed through
-        static_parts = [o for o in self.original_placements
-                        if o != self.selected_obj and id(o) not in displaced_set]
+    def _sync_coin_disp(self, obj):
+        """Update obj's SoTranslation from its current cache position."""
+        key = id(obj)
+        entry = self._coin_disp_nodes.get(key)
+        if not entry:
+            return
+        trans, _ = entry
+        cached = self.collision_resolver._base_cache.get(key)
+        start = self._coin_disp_starts.get(key)
+        if cached and start:
+            trans.translation.setValue(cached[0] - start[0], cached[1] - start[1], 0)
 
-        # Single collision pass per frame — multi-iteration fighting is what causes stick-slip.
-        # max_iterations=1 keeps the correction light so physics pushes remain dominant.
-        for obj in displaced_objs:
-            self.collision_resolver.separate_overlapping(
-                obj, [self.selected_obj] + static_parts, max_iterations=1
-            )
-            if dragged_sheet_bbox:
-                self.collision_resolver.clamp_to_sheet(obj, dragged_sheet_bbox)
+    def _detach_all_coin_disp_nodes(self):
+        """Remove all injected SoTranslation nodes and reset their objects' visual offset."""
+        for key, (trans, obj) in list(self._coin_disp_nodes.items()):
+            try:
+                obj.ViewObject.RootNode.removeChild(trans)
+            except Exception:
+                pass
+        self._coin_disp_nodes.clear()
+        self._coin_disp_starts.clear()
 
-        for i, obj in enumerate(displaced_objs):
-            for other in displaced_objs[i + 1:]:
-                self.collision_resolver.resolve_bi_collision(obj, other)
-                if dragged_sheet_bbox:
-                    self.collision_resolver.clamp_to_sheet(obj, dragged_sheet_bbox)
-                    self.collision_resolver.clamp_to_sheet(other, dragged_sheet_bbox)
+    def _commit_displaced_placements(self):
+        """Write each displaced part's logical position (from cache) to obj.Placement,
+        then detach the Coin3D nodes."""
+        for key, (trans, obj) in list(self._coin_disp_nodes.items()):
+            cached = self.collision_resolver._base_cache.get(key)
+            if cached:
+                try:
+                    pl = obj.Placement
+                    pl.Base = FreeCAD.Vector(cached[0], cached[1], pl.Base.z)
+                    obj.Placement = pl
+                except Exception as e:
+                    FreeCAD.Console.PrintWarning(f"[Coin3D] commit failed for {obj.Label}: {e}\n")
+        self._detach_all_coin_disp_nodes()
+
+    def _set_part_highlight(self, obj, invalid):
+        """Color the dragged part red to signal an impossible placement, restore otherwise."""
+        if not obj or not hasattr(obj, 'ViewObject') or not obj.ViewObject:
+            return
+        if invalid:
+            if self._dragged_original_color is None:
+                try:
+                    self._dragged_original_color = obj.ViewObject.ShapeColor
+                except Exception:
+                    pass
+            try:
+                obj.ViewObject.ShapeColor = (1.0, 0.0, 0.0)
+            except Exception:
+                pass
+        else:
+            if self._dragged_original_color is not None:
+                try:
+                    obj.ViewObject.ShapeColor = self._dragged_original_color
+                except Exception:
+                    pass
+                self._dragged_original_color = None
 
     def _get_shape_bbox(self, obj, parent_placement=None):
         """Returns the global BoundBox for an object, prioritizing BoundaryObject.
@@ -833,37 +1192,51 @@ class ManualNesterToolObserver:
 
         FreeCAD.Console.PrintMessage("Operation Cancelled.\n")
 
-        # M-009: Revert physics-displaced parts
-        try:
-            if self.layout_group:
-                for obj, placement in list(self.pre_drag_placements.items()):
-                    try:
-                        _ = obj.Name  # Trigger ReferenceError if C++ obj is deleted
-                        obj.Placement = placement
-                    except Exception as e:
-                        FreeCAD.Console.PrintWarning(f"[ManualNesterTool] Failed to revert displaced part: {e}\n")
-        except Exception as e:
-            FreeCAD.Console.PrintWarning(f"[ManualNesterTool] Pre-drag revert loop failed: {e}\n")
-
+        # M-009: Revert physics-displaced parts.
+        # obj.Placement was never written during Coin3D drag, so visual revert is
+        # just removing the injected SoTranslation nodes.  obj.Placement is already
+        # at the original position, so no Placement write is needed.
+        self._detach_all_coin_disp_nodes()
         self.pre_drag_placements = {}
 
         # Reset input state
         self.input.reset()
         self.start_placement = None
         self.start_pos = None
+        if self.selected_obj:
+            self._set_part_highlight(self.selected_obj, False)
         self.selected_obj = None
         self._drag_active_sheet = None
+        self._dragged_original_color = None
+        self._physics_logged_empty_sheet = None
+        self._physics_logged_active_sheet = None
+        self._physics_logged_result_sheet = None
+        self._physics_logged_norange_sheet = None
+        self._stop_physics_timer()
+        self.collision_resolver.clear_cache()
 
         # Defer scene graph modification to avoid Coin3D crash inside callback
         QtCore.QTimer.singleShot(0, self._hide_radius_indicator)
 
     def finish_operation(self):
+        # Commit Coin3D-displaced parts' logical positions to obj.Placement before
+        # clearing state, so the session is saved with correct placements.
+        self._commit_displaced_placements()
         self.input.finish()
+        if self.selected_obj:
+            self._set_part_highlight(self.selected_obj, False)
         self.selected_obj = None # Clear selection to prevent stickiness
         self.start_placement = None
         self.start_pos = None
         self.pre_drag_placements = {} # M-009: Clear pre-drag placements
         self._drag_active_sheet = None
+        self._dragged_original_color = None
+        self._physics_logged_empty_sheet = None
+        self._physics_logged_active_sheet = None
+        self._physics_logged_result_sheet = None
+        self._physics_logged_norange_sheet = None
+        self._stop_physics_timer()
+        self.collision_resolver.clear_cache()
         try:
             self._hide_radius_indicator() # M-010
         except Exception:
@@ -1015,6 +1388,9 @@ class ManualNesterToolObserver:
 
     def cleanup(self):
         """Removes the event callbacks from the view and restores original visibilities."""
+        self._stop_physics_timer()
+        self._physics_executor.shutdown(wait=False)
+        self._detach_all_coin_disp_nodes()
         # Remove Coin3D radius indicator first
         self._hide_radius_indicator()
 
@@ -1164,6 +1540,10 @@ class ManualNesterToolObserver:
         if not coin or not self.view:
             return
 
+        scene = self.view.getSceneGraph()
+        if not scene:
+            return
+
         if not self.radius_indicator:
             # Create the node tree
             self.radius_indicator = coin.SoSeparator()
@@ -1191,20 +1571,29 @@ class ManualNesterToolObserver:
             line_set = coin.SoLineSet()
             self.radius_indicator.addChild(line_set)
 
-            # Add to view
-            self.view.getSceneGraph().addChild(self.radius_indicator)
+            scene.addChild(self.radius_indicator)
+            # Fresh node — force circle geometry recomputation regardless of cached radius.
+            self._indicator_last_radius = None
+        else:
+            try:
+                if scene.findChild(self.radius_indicator) < 0:
+                    # Node exists but was orphaned (e.g., scene graph rebuilt by FreeCAD).
+                    scene.addChild(self.radius_indicator)
+            except Exception:
+                pass
 
         # Update position
         self.indicator_trans.translation.setValue(center.x, center.y, center.z + 0.1) # Slightly above XY
 
-        # Update circle geometry
-        points = []
-        segments = 64
-        for i in range(segments + 1):
-            angle = 2.0 * math.pi * i / segments
-            points.append((radius * math.cos(angle), radius * math.sin(angle), 0))
-
-        self.indicator_coords.point.setValues(0, len(points), points)
+        # Only recompute circle geometry when radius changes (trig is expensive per-frame)
+        if getattr(self, '_indicator_last_radius', None) != radius:
+            points = []
+            segments = 64
+            for i in range(segments + 1):
+                angle = 2.0 * math.pi * i / segments
+                points.append((radius * math.cos(angle), radius * math.sin(angle), 0))
+            self.indicator_coords.point.setValues(0, len(points), points)
+            self._indicator_last_radius = radius
 
     def _hide_radius_indicator(self):
         """M-010: Removes the radius indicator from the view."""

@@ -41,22 +41,20 @@ def test_compute_falloff():
 
 
 def test_compute_displacements_point_parts():
-    """Point-like parts (zero size) — gap distance equals center distance."""
+    """Parts at given centers — falloff uses center-to-center distance."""
     pe = PhysicsEngine(radius=100.0, curve_exponent=1.0, strength=1.0)
 
     dragged_center = MockVector(0, 0, 0)
     drag_delta = MockVector(10, 0, 0)
 
-    # (obj, center, width, height) — zero-size parts
+    # (obj, center, width, height)
     parts_info = [
-        ("part1", MockVector(50, 0, 0), 0, 0),   # gap 50 -> falloff 0.5
-        ("part2", MockVector(0, 50, 0), 0, 0),   # gap 50 -> falloff 0.5
-        ("part3", MockVector(150, 0, 0), 0, 0),  # gap 150 -> falloff 0.0
+        ("part1", MockVector(50, 0, 0), 0, 0),   # distance 50 -> falloff 0.5
+        ("part2", MockVector(0, 50, 0), 0, 0),   # distance 50 -> falloff 0.5
+        ("part3", MockVector(150, 0, 0), 0, 0),  # distance 150 -> falloff 0.0
     ]
 
-    displacements = pe.compute_displacements(
-        dragged_center, 0, 0, drag_delta, parts_info
-    )
+    displacements = pe.compute_displacements(dragged_center, drag_delta, parts_info)
 
     assert len(displacements) == 3
 
@@ -74,50 +72,41 @@ def test_compute_displacements_point_parts():
 
 
 def test_compute_displacements_with_dimensions():
-    """Parts with real dimensions — gap distance is edge-to-edge, not center-to-center."""
+    """Parts with real dimensions — falloff still uses center-to-center distance."""
     pe = PhysicsEngine(radius=100.0, curve_exponent=1.0, strength=1.0)
 
     dragged_center = MockVector(0, 0, 0)
     drag_delta = MockVector(10, 0, 0)
 
-    # Dragged part is 20x20, other part is 20x20, centers are 50 apart on X
-    # gap_x = |50| - (20+20)/2 = 50 - 20 = 30
-    # gap_y = max(0, 0 - 20) = 0
-    # edge_distance = 30 -> falloff = 1 - 30/100 = 0.7
+    # Centers are 50 apart on X; center-to-center distance = 50
+    # falloff = 1 - 50/100 = 0.5, push = 10 * 0.5 = 5
     parts_info = [
         ("part1", MockVector(50, 0, 0), 20, 20),
     ]
 
-    displacements = pe.compute_displacements(
-        dragged_center, 20, 20, drag_delta, parts_info
-    )
+    displacements = pe.compute_displacements(dragged_center, drag_delta, parts_info)
 
-    # push_magnitude = 10 * 0.7 = 7, direction = (1, 0)
     assert displacements[0][0] == "part1"
-    assert displacements[0][1] == MockVector(7, 0, 0)
+    assert displacements[0][1] == MockVector(5, 0, 0)
 
 
 def test_compute_displacements_overlapping():
-    """Parts whose bounding boxes overlap have gap distance 0 — full falloff."""
+    """Overlapping parts — center-to-center distance still determines falloff."""
     pe = PhysicsEngine(radius=100.0, curve_exponent=1.0, strength=1.0)
 
     dragged_center = MockVector(0, 0, 0)
     drag_delta = MockVector(10, 0, 0)
 
-    # Dragged 40x40, other 40x40, center only 20 apart — boxes overlap
-    # gap_x = max(0, |20| - (40+40)/2) = max(0, 20 - 40) = 0
-    # edge_distance = 0 -> falloff = 1.0
+    # Centers are 20 apart; distance = 20, falloff = 1 - 20/100 = 0.8
     parts_info = [
         ("part1", MockVector(20, 0, 0), 40, 40),
     ]
 
-    displacements = pe.compute_displacements(
-        dragged_center, 40, 40, drag_delta, parts_info
-    )
+    displacements = pe.compute_displacements(dragged_center, drag_delta, parts_info)
 
-    # push_magnitude = 10 * 1.0 = 10, direction = (1, 0)
+    # push_magnitude = 10 * 0.8 = 8, direction = (1, 0)
     assert displacements[0][0] == "part1"
-    assert displacements[0][1] == MockVector(10, 0, 0)
+    assert displacements[0][1] == MockVector(8, 0, 0)
 
 
 def test_strength():
@@ -126,15 +115,13 @@ def test_strength():
     dragged_center = MockVector(0, 0, 0)
     drag_delta = MockVector(10, 0, 0)
 
-    # gap = 50, falloff = 0.5, strength = 2.0 -> factor = 1.0
+    # distance = 50, falloff = 0.5, strength = 2.0 -> factor = 1.0 (capped)
     # push_magnitude = 10 * 1.0 = 10
     parts_info = [
         ("part1", MockVector(50, 0, 0), 0, 0),
     ]
 
-    displacements = pe.compute_displacements(
-        dragged_center, 0, 0, drag_delta, parts_info
-    )
+    displacements = pe.compute_displacements(dragged_center, drag_delta, parts_info)
 
     assert displacements[0][1] == MockVector(10, 0, 0)
 
@@ -150,9 +137,7 @@ def test_coincident_centers():
         ("part1", MockVector(0, 0, 0), 10, 10),
     ]
 
-    displacements = pe.compute_displacements(
-        dragged_center, 10, 10, drag_delta, parts_info
-    )
+    displacements = pe.compute_displacements(dragged_center, drag_delta, parts_info)
 
     assert displacements[0][1] == MockVector(0, 0, 0)
 
@@ -170,11 +155,9 @@ def test_diagonal_repulsion():
         ("part1", MockVector(c, c, 0), 0, 0),
     ]
 
-    displacements = pe.compute_displacements(
-        dragged_center, 0, 0, drag_delta, parts_info
-    )
+    displacements = pe.compute_displacements(dragged_center, drag_delta, parts_info)
 
-    # gap = 100, falloff = 1 - 100/200 = 0.5, push = 10 * 0.5 = 5
+    # distance = 100, falloff = 1 - 100/200 = 0.5, push = 10 * 0.5 = 5
     # direction = (c/100, c/100) = (1/sqrt2, 1/sqrt2)
     expected_component = 5.0 / math.sqrt(2)
     result = displacements[0][1]
