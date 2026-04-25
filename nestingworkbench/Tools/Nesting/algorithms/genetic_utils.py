@@ -45,7 +45,6 @@ def crossover_genes(parent1_genes, parent2_genes):
 
     return child
 
-
 def mutate_genes(genes, mutation_rate, rotation_steps):
     """
     Mutation on (part_id, angle) gene tuples. Returns a new list (not in-place).

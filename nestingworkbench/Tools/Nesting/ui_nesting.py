@@ -77,7 +77,6 @@ class NestingPanel(QtGui.QWidget):
         self.sheet_thickness_input = QtGui.QDoubleSpinBox(); self.sheet_thickness_input.setRange(0.1, 1000); self.sheet_thickness_input.setValue(_DEFAULTS["sheet_thickness"])
         self.part_spacing_input = QtGui.QDoubleSpinBox(); self.part_spacing_input.setRange(0, 1000); self.part_spacing_input.setValue(_DEFAULTS["part_spacing"])
         
-        # --- Advanced Boundary Settings ---
         # Deflection is now specified as an angle (degrees) for more intuitive control
         # Internally converted to linear deflection: deflection_mm = angle / 200.0
         self.deflection_input = QtGui.QDoubleSpinBox()
@@ -103,7 +102,6 @@ class NestingPanel(QtGui.QWidget):
             "<i>Tip: Set this to your machine's precision tolerance (e.g., 1mm for routers).</i>"
         )
 
-
         self.shape_table = QtGui.QTableWidget()
         self.shape_table.setColumnCount(6)
         self.shape_table.setHorizontalHeaderLabels(["Shape", "Quantity", "Rotations", "Override", "Up Dir", "Fill"])
@@ -112,9 +110,6 @@ class NestingPanel(QtGui.QWidget):
         self.rotation_angles = _DEFAULTS["rotation_angles"]
         
 
-
-
-        # --- Minkowski Packer Settings ---
         self.minkowski_settings_group = QtGui.QGroupBox("Minkowski Nesting Settings")
         minkowski_form_layout = QtGui.QFormLayout()
 
@@ -195,7 +190,6 @@ class NestingPanel(QtGui.QWidget):
         
         self.minkowski_settings_group.setLayout(minkowski_form_layout)
 
-        # --- Physics Packer Settings ---
         self.physics_settings_group = QtGui.QGroupBox("Physics Nesting Settings")
         physics_form_layout = QtGui.QFormLayout()
 
@@ -296,10 +290,6 @@ class NestingPanel(QtGui.QWidget):
         self.minkowski_settings_group.setVisible(True)
         self.physics_settings_group.setVisible(False)
 
-
-
-
-
         self.show_bounds_checkbox = QtGui.QCheckBox("Show Bounds"); self.show_bounds_checkbox.setChecked(True)
         self.add_labels_checkbox = QtGui.QCheckBox("Add Identifier Labels"); self.add_labels_checkbox.setChecked(True)
         self.label_height_input = QtGui.QDoubleSpinBox(); self.label_height_input.setRange(0, 1000); self.label_height_input.setValue(25.0)
@@ -315,11 +305,9 @@ class NestingPanel(QtGui.QWidget):
         self.cancel_button = QtGui.QPushButton("Cancel Nesting")
         self.cancel_button.setEnabled(False)
 
-        # --- Add/Remove buttons for the shape table ---
         self.add_parts_button = QtGui.QPushButton("Add Selected")
         self.remove_parts_button = QtGui.QPushButton("Remove Selected")
         
-        # --- Font Selection UI Elements ---
         self.font_select_button = QtGui.QPushButton("Select Font")
         self.font_label = QtGui.QLabel("No Font Selected")
         self.font_label.setWordWrap(True)
@@ -329,7 +317,6 @@ class NestingPanel(QtGui.QWidget):
         self.status_label = QtGui.QLabel("Select master shapes to nest.")
         self.status_label.setWordWrap(True)
 
-        # --- Layout Assembly ---
         label_options_layout = QtGui.QHBoxLayout()
         label_options_layout.addWidget(self.add_labels_checkbox)
         label_options_layout.addWidget(QtGui.QLabel("Size:"))
@@ -337,7 +324,6 @@ class NestingPanel(QtGui.QWidget):
         label_options_layout.addWidget(QtGui.QLabel("Height (Z):"))
         label_options_layout.addWidget(self.label_height_input)
         label_options_layout.addStretch()
-
 
         form_layout.addRow("Sheet Width:", self.sheet_width_input)
         form_layout.addRow("Sheet Height:", self.sheet_height_input)
@@ -352,7 +338,6 @@ class NestingPanel(QtGui.QWidget):
         curve_settings_layout.addWidget(self.simplification_input)
         
         form_layout.addRow("Bounds Resolution:", curve_settings_layout)
-
 
         form_layout.addRow(self.minkowski_settings_group)
         form_layout.addRow(self.physics_settings_group)
@@ -377,7 +362,6 @@ class NestingPanel(QtGui.QWidget):
         main_layout.addLayout(table_button_layout)
         main_layout.addLayout(action_button_layout)
         
-        # --- Progress Bar ---
         self.progressBar = QtGui.QProgressBar()
         self.progressBar.setRange(0, 100)
         self.progressBar.setValue(0)
@@ -391,7 +375,6 @@ class NestingPanel(QtGui.QWidget):
         self.setLayout(main_layout)
 
         # Connect signals
-
 
         # Link label inputs to the add labels checkbox
         def toggle_label_inputs(state):
@@ -441,7 +424,6 @@ class NestingPanel(QtGui.QWidget):
         quantity_spinbox.setRange(1, 500)
         quantity_spinbox.setValue(quantity)
 
-        # --- Rotation Override Widget ---
         rotation_widget = QtGui.QWidget()
         rotation_layout = QtGui.QHBoxLayout(rotation_widget)
         rotation_layout.setContentsMargins(0, 0, 0, 0)
@@ -466,13 +448,11 @@ class NestingPanel(QtGui.QWidget):
         override_checkbox.stateChanged.connect(rotation_widget.setEnabled)
         rotation_widget.setEnabled(override_rotation) # Disabled by default unless overridden
 
-        # --- Up Direction Combo ---
         up_dir_combo = QtGui.QComboBox()
         up_dir_combo.addItems(["Z+", "Z-", "Y+", "Y-", "X+", "X-"])
         up_dir_combo.setCurrentText(up_direction)
         up_dir_combo.setToolTip("Define which direction is 'up' for this part when projecting to 2D.")
 
-        # --- Fill Sheet Checkbox ---
         fill_checkbox = QtGui.QCheckBox()
         fill_checkbox.setChecked(fill_sheet)
         fill_checkbox.setToolTip("If checked, this part will be used to fill remaining space after all other parts are placed.")

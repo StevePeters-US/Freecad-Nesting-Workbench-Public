@@ -8,7 +8,6 @@ from .algorithms import nesting_strategy
 from .algorithms import physics_nester
 from .visualization_manager import VisualizationManager
 
-
 class _MainThreadRelay(QtCore.QObject):
     """QObject that lives on the main thread.
     Signals emitted from worker threads are queued and execute on the main thread.
@@ -30,10 +29,8 @@ class _MainThreadRelay(QtCore.QObject):
         """Post callable to be executed on the main thread."""
         self._fn_signal.emit(fn)
 
-
 # Created once at module load time (always the main thread)
 _main_thread_relay = _MainThreadRelay()
-
 
 def _main_thread_wrapper(fn):
     """Wraps a callback so it always executes on the main thread.
@@ -142,7 +139,6 @@ def _cleanup_highlighting(viz_manager):
     if viz_manager:
         viz_manager.clear_highlight()
 
-# --- Public Function ---
 def nest(parts, width, height, rotation_steps=1, simulate=False, algorithm='Minkowski', viz_manager=None, **kwargs):
     """
     Convenience function to run the nesting algorithm.

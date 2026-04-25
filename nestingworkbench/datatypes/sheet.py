@@ -62,8 +62,6 @@ class Sheet:
         """
         return FreeCAD.Vector(self.id * (self.width + self.spacing), 0, 0)
 
-
-
     def is_placement_valid(self, shape_to_check, part_to_ignore=None):
         """
         Checks if a shape's placement is valid on this sheet, considering both
@@ -79,19 +77,16 @@ class Sheet:
         if not SHAPELY_AVAILABLE: return False
         if not shape_to_check.polygon: return False
 
-        # 1. Check containment within sheet boundaries
         bin_polygon = Polygon([(0, 0), (self.width, 0), (self.width, self.height), (0, self.height)])
         if not bin_polygon.contains(shape_to_check.polygon):
             return False
 
-        # 2. Check for collision with other parts
         for placed_part in self.parts:
             if placed_part.shape != part_to_ignore and placed_part.shape and placed_part.shape.polygon:
                 if shape_to_check.polygon.intersects(placed_part.shape.polygon):
                     return False
         
         return True
-
 
     def draw(self, doc, ui_params, parent_group=None, transient_part=None, parts_to_place_group=None, x_offset=0, verbose=False):
         """
@@ -115,7 +110,6 @@ class Sheet:
         if x_offset != 0:
             sheet_origin = FreeCAD.Vector(sheet_origin.x + x_offset, sheet_origin.y, sheet_origin.z)
 
-        # --- Final Drawing Mode (with parent_group) ---
         if parent_group:
             self.parent_group_name = parent_group.Name
             # Create or Retrieve the group structure for this sheet
@@ -159,7 +153,6 @@ class Sheet:
             for placed_part in self.parts:
                 self._draw_single_part(doc, placed_part.shape, sheet_origin, ui_params, sheet_group, parts_to_place_group, verbose=verbose)
 
-        # --- Simulation Drawing Mode (with transient_part) ---
         elif transient_part:
             # Draw/update sheet boundary during simulation
             sim_boundary_name = f"sim_sheet_boundary_{self.id}"
@@ -260,7 +253,6 @@ class Sheet:
                 f" container_plc=({final_placement.Base.x:.2f}, {final_placement.Base.y:.2f})\n"
             )
 
-        # --- Handle the label object AFTER the container is placed ---
         if ui_params.get('add_labels', False) and Draft and ui_params.get('font_path') and hasattr(shape, 'label_text') and shape.label_text:
             label_name = f"label_{shape.id}"
             # Allow FreeCAD to auto-rename if collision exists (e.g. label_Part001)

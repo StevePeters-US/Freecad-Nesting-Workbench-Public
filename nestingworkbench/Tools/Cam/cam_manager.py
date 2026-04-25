@@ -33,7 +33,6 @@ class CAMManager:
             if obj.isDerivedFrom("App::DocumentObjectGroup") and obj.Label.startswith("Sheet_"):
                 self._create_job_for_sheet(obj, include_parts, include_labels, include_outlines, template_path)
 
-
     def _create_job_for_sheet(self, sheet_group, include_parts=True, include_labels=True, include_outlines=False, template_path=None):
         """Creates a CAM job for a sheet with proper stock dimensions.
         

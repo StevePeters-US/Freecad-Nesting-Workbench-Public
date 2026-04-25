@@ -53,14 +53,12 @@ class Shape:
         self.instance_num = 1 # Default, will be overridden on copies
         self.id = f"{source_freecad_object.Label}_{self.instance_num}"
         
-        # --- Geometric properties (merged from ShapeBounds) ---
         self._angle = 0
         self.polygon = None # The current, transformed polygon for collision checks
         self.original_polygon = None # The un-rotated buffered polygon, used as a base for rotation
         self.unbuffered_polygon = None # The un-rotated, un-buffered polygon for area calculation
         self.source_centroid = None # The original pivot point from the FreeCAD geometry
 
-        # --- Metadata ---
         self.label_text = None # Will hold the text for the Draft.ShapeString object
         self.rotation_steps = 1 # The definitive number of rotation steps for this part.
         self.spacing = 0 # The spacing used for the nesting operation.
@@ -69,7 +67,6 @@ class Shape:
         self.up_direction = "Z+" # The up direction for 2D projection
         self.fill_sheet = False # If True, use to fill remaining space
         
-        # --- State during/after nesting ---
         self.fc_object = None # Link to the physical FreeCAD object in the 'PartsToPlace' group
         self.placement = None # This will be populated with the final FreeCAD.Placement after nesting.
 

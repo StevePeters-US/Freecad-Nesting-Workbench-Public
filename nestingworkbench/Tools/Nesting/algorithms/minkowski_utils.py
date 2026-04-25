@@ -14,7 +14,6 @@ from ....datatypes.shape import Shape
 
 _decomposition_lock = threading.Lock()
 
-
 def decompose_if_needed(polygon, logger):
     """Decomposes a non-convex polygon into convex parts (triangles)."""
     if not polygon or polygon.is_empty:
@@ -71,7 +70,6 @@ def decompose_if_needed(polygon, logger):
         Shape.decomposition_cache[cache_key] = result
     return result
 
-
 def minkowski_sum_convex(poly1, poly2):
     """Computes the Minkowski sum of two convex polygons."""
     # The Minkowski sum of two convex polygons is the convex hull of the sum of their vertices.
@@ -86,7 +84,6 @@ def minkowski_sum_convex(poly1, poly2):
     
     # The convex hull of these summed points is the Minkowski sum.
     return MultiPoint(sum_vertices).convex_hull
-
 
 def minkowski_difference_convex(poly1, poly2):
     """
@@ -112,7 +109,6 @@ def minkowski_difference_convex(poly1, poly2):
             return None
     
     return eroded_poly
-
 
 def calculate_inner_fit_polygon(master_poly1, angle1, master_poly2, angle2, logger):
     """
@@ -155,7 +151,6 @@ def calculate_inner_fit_polygon(master_poly1, angle1, master_poly2, angle2, logg
     
     return final_difference
 
-
 def minkowski_sum(master_poly1, angle1, reflect1, master_poly2, angle2, reflect2, logger, rot_origin1=None, rot_origin2=None):
     """
     Computes the Minkowski sum of two polygons.
@@ -169,7 +164,6 @@ def minkowski_sum(master_poly1, angle1, reflect1, master_poly2, angle2, reflect2
     poly1_convex_parts = decompose_if_needed(master_poly1, logger)
     poly2_convex_parts = decompose_if_needed(master_poly2, logger)
 
-    # --- Transform Convex Parts ---
     # CRITICAL: Use the MASTER polygon's centroid for all transformations
     # to keep the decomposed convex parts in their correct relative positions.
     c1 = master_poly1.centroid

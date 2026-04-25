@@ -12,7 +12,6 @@ import FreeCAD
 import Part
 from ..Nesting.algorithms.shape_processor import get_2d_profile_from_obj
 
-
 def create_cross_section(obj, cut_height=None):
     """
     Creates a 2D silhouette by cutting the object with a horizontal plane.
@@ -78,7 +77,6 @@ def create_cross_section(obj, cut_height=None):
         FreeCAD.Console.PrintError(f"[CrossSection] Error for '{obj.Label}': {e}\n")
         return None
 
-
 def is_valid_shape_object(obj):
     """
     Check if an object is a valid geometric shape (not a group or container).
@@ -119,7 +117,6 @@ def is_valid_shape_object(obj):
     
     return True, "Valid"
 
-
 def create_silhouette(obj, up_direction="Z+"):
     """
     Creates a 2D silhouette face from a 3D object.
@@ -149,7 +146,6 @@ def create_silhouette(obj, up_direction="Z+"):
     except Exception as e:
         FreeCAD.Console.PrintError(f"Failed to create silhouette for '{obj.Label}': {e}\n")
         return None
-
 
 def shapely_to_fc_face(shapely_polygon):
     """
@@ -205,7 +201,6 @@ def shapely_to_fc_face(shapely_polygon):
                 FreeCAD.Console.PrintWarning(f"Could not cut hole: {e}\n")
     
     return face
-
 
 def create_silhouette_container(doc, source_obj, up_direction="Z+"):
     """
@@ -275,7 +270,6 @@ def create_silhouette_container(doc, source_obj, up_direction="Z+"):
     
     return container, silhouette_obj
 
-
 def is_layout_group(obj):
     """
     Check if an object is a Layout group.
@@ -288,7 +282,6 @@ def is_layout_group(obj):
     """
     return (obj.isDerivedFrom("App::DocumentObjectGroup") and 
             obj.Label.startswith("Layout_"))
-
 
 def get_parts_from_layout_by_sheet(layout_group):
     """
@@ -364,7 +357,6 @@ def get_parts_from_layout_by_sheet(layout_group):
     FreeCAD.Console.PrintMessage(f"[Silhouette] Found {total_parts} parts across {len(sheets_data)} sheets\n")
     
     return sheets_data
-
 
 def create_silhouettes_for_layout(doc, layout_group, cut_height=None, method="cross_section"):
     """
@@ -467,7 +459,6 @@ def create_silhouettes_for_layout(doc, layout_group, cut_height=None, method="cr
     
     return all_silhouettes
 
-
 def is_nested_container(obj):
     """
     Check if an object is a nested part container (App::Part like nested_Side_1).
@@ -482,7 +473,6 @@ def is_nested_container(obj):
         return False
     # Nested containers from nesting start with "nested_"
     return obj.Label.startswith("nested_")
-
 
 def create_silhouette_for_container(doc, container, cut_height=None, method="cross_section"):
     """
@@ -545,7 +535,6 @@ def create_silhouette_for_container(doc, container, cut_height=None, method="cro
     
     return silhouette_obj
 
-
 def create_silhouette_for_part(doc, part_obj, parent_container=None, cut_height=None, method="cross_section"):
     """
     Creates a silhouette for an individual part.
@@ -595,7 +584,6 @@ def create_silhouette_for_part(doc, part_obj, parent_container=None, cut_height=
     
     return silhouette_obj
 
-
 # Keep backward compatibility - old function name
 def get_parts_from_layout(layout_group):
     """Backward compatible wrapper - returns flat list of parts."""
@@ -604,6 +592,4 @@ def get_parts_from_layout(layout_group):
     for sheet_parts in sheets_data.values():
         parts.extend(sheet_parts)
     return parts
-
-
 

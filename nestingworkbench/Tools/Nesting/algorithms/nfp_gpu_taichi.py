@@ -92,7 +92,6 @@ if TAICHI_AVAILABLE:
                     out_idx += 1
             out_len[p] = out_idx
 
-
     @ti.kernel
     def compute_minkowski_sum_convex_kernel(
         n_poly_a: int, 
@@ -152,7 +151,6 @@ if TAICHI_AVAILABLE:
                     out_idx += 1
                     
             out_len[r, i, j] = out_idx
-
 
     @ti.kernel
     def is_inside_any_convex_kernel(
@@ -216,7 +214,6 @@ if TAICHI_AVAILABLE:
             
             results[p_idx] = is_found
 
-
     @ti.kernel
     def convex_hull_2d_kernel(
         n_pairs: int,
@@ -235,7 +232,6 @@ if TAICHI_AVAILABLE:
                 hull_len[p] = 0
                 continue
             
-            # 1. Find the leftmost point (with the lowest x-coordinate)
             # If there's a tie, pick the one with the lowest y-coordinate.
             leftmost = 0
             for i in range(1, pts_count):
@@ -245,7 +241,6 @@ if TAICHI_AVAILABLE:
                     if points[p, i, 1] < points[p, leftmost, 1]:
                         leftmost = i
             
-            # 2. Jarvis March
             curr = leftmost
             hull_idx = 0
             
@@ -332,7 +327,6 @@ if TAICHI_AVAILABLE:
             
         return results
 
-
     @ti.kernel
     def bounds_check_kernel(
         n_pts: int,
@@ -404,20 +398,16 @@ if TAICHI_AVAILABLE:
         if not points_np.any():
             return np.zeros(len(points_np), dtype=np.int32)
             
-        # 1. Check solids
         solid_results = compute_batch_pip(points_np, solid_polys)
         if not np.any(solid_results == 1):
             return solid_results # All 0
             
-        # 2. Check holes (only for points that hit a solid)
         if not hole_polys:
             return solid_results
             
         hole_results = compute_batch_pip(points_np, hole_polys)
         
-        # 3. Collision iff (Inside Solid) AND (NOT Inside Hole)
         return solid_results & ~hole_results
-
 
     def compute_nfp_pairs(pairs):
         """
@@ -466,7 +456,6 @@ if TAICHI_AVAILABLE:
             
         # GPU Convex Hull (GPU-001)
         return compute_convex_hulls_gpu(out_verts_np, out_len_np)
-
 
     def compute_nfp_batch(poly_a_list, poly_b_list, rotations_deg):
         """
@@ -568,7 +557,6 @@ if TAICHI_AVAILABLE:
 else:
     def compute_nfp_batch(poly_a_list, poly_b_list, rotations_deg):
         raise ImportError("Taichi is not installed. Cannot compute GPU NFP.")
-
 
     def bounds_check_kernel(n_pts, points, rotated_extents, bin_w, bin_h, results):
         raise ImportError("Taichi is not installed. Cannot compute GPU bounds check.")

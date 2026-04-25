@@ -12,7 +12,6 @@ class PhysicsNester(BaseNester):
 
     def __init__(self, width, height, rotation_steps=1, **kwargs):
         super().__init__(width, height, rotation_steps, **kwargs)
-        # --- Algorithm-specific parameters ---
         self.physics_direction = kwargs.get("physics_direction", (0, -1))
         self.max_spawn_count = kwargs.get("max_spawn_count", 100)
         self.max_nesting_steps = kwargs.get("max_nesting_steps", 500)

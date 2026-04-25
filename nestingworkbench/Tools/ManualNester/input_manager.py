@@ -25,12 +25,10 @@ except ImportError:
     from PySide.QtGui import QApplication as _QApp
     from PySide.QtCore import Qt as _Qt
 
-
 def _qt_modifiers():
     """Return (shift, ctrl) booleans from Qt's live modifier state."""
     mods = _QApp.queryKeyboardModifiers()
     return bool(mods & _Qt.ShiftModifier), bool(mods & _Qt.ControlModifier)
-
 
 class InputManager:
     """
@@ -57,7 +55,6 @@ class InputManager:
         self._handlers = {}
         self._active = False
 
-        # --- public input state (read by the tool) ---
         self.mode = "IDLE"          # IDLE | TRANSLATE | ROTATE
         self.constraint = None      # None | "X" | "Y"
         self.constraint_lock_pos = None  # FreeCAD.Vector when constraint activated
@@ -75,9 +72,7 @@ class InputManager:
         self._button_poll_timer = QtCore.QTimer()
         self._button_poll_timer.timeout.connect(self._poll_button_state)
 
-    # ------------------------------------------------------------------
     # Public API
-    # ------------------------------------------------------------------
 
     def on(self, action, handler):
         """Register *handler* for a high-level *action*."""
@@ -146,9 +141,7 @@ class InputManager:
         """Hard-reset all input state (used on cancel)."""
         self.finish()
 
-    # ------------------------------------------------------------------
     # Internal — Coin3D callback wiring
-    # ------------------------------------------------------------------
 
     def _poll_button_state(self):
         """Detect missed mouse-UP events by polling Qt's actual button state."""
@@ -187,9 +180,7 @@ class InputManager:
             )
             return False
 
-    # ------------------------------------------------------------------
     # Keyboard
-    # ------------------------------------------------------------------
 
     def _handle_keyboard(self, event_dict):
         if event_dict["State"] != "DOWN":
@@ -215,16 +206,13 @@ class InputManager:
 
         return False
 
-    # ------------------------------------------------------------------
     # Mouse buttons
-    # ------------------------------------------------------------------
 
     def _handle_mouse_button(self, event_dict):
         pos = event_dict.get("Position", (0, 0))
         btn = event_dict.get("Button")
         state = event_dict.get("State")
 
-        # ---- Left button ------------------------------------------------
         if btn in ("BUTTON1", 1):
             if state == "DOWN":
                 current_time = time.time()
@@ -271,7 +259,6 @@ class InputManager:
                     self._emit("release")
                 return True
 
-        # ---- Right button (cancel) --------------------------------------
         elif btn in ("BUTTON2", "BUTTON3", 2, 3):
             if state == "DOWN":
                 if self.mode != "IDLE" or self.is_free_grab:
@@ -280,7 +267,6 @@ class InputManager:
             else:
                 return True  # consume UP to suppress context menu
 
-        # ---- Scroll wheel ------------------------------------------------
         elif btn in ("BUTTON4", "BUTTON5", 4, 5):
             _shift, ctrl = _qt_modifiers()
             if state == "DOWN" and ctrl:
@@ -291,9 +277,7 @@ class InputManager:
 
         return False
 
-    # ------------------------------------------------------------------
     # Mouse movement
-    # ------------------------------------------------------------------
 
     def _handle_mouse_move(self, event_dict):
         pos = event_dict["Position"]
@@ -354,9 +338,7 @@ class InputManager:
             return True
         return False
 
-    # ------------------------------------------------------------------
     # Helpers
-    # ------------------------------------------------------------------
 
     def _emit(self, action, *args):
         """Call the registered handler for *action*, if any."""

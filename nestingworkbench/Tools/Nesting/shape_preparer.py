@@ -9,8 +9,6 @@ from ...datatypes.shape_object import create_shape_object
 from ...datatypes.shape import Shape
 from ...freecad_helpers import get_up_direction_rotation
 
-
-
 class ShapePreparer:
     """
     Handles the preparation of shapes for nesting.
@@ -41,14 +39,12 @@ class ShapePreparer:
         simplification = ui_global_settings.get('simplification', 0.1)
         verbose = ui_global_settings.get('verbose', False)
         
-        # --- Create or Retrieve the hidden MasterShapes group ---
         master_shapes_group = self._get_or_create_master_group(layout_obj)
 
         master_shape_obj_map = {} # Maps original FreeCAD object ID to the new master ShapeObject
         master_geometry_cache = {} # Maps original FreeCAD object ID to the processed Shape wrapper
         masters_to_place = []
 
-        # --- Step 1: Create the FreeCAD "master" objects for each unique part. ---
         for label, master_obj in master_shapes_map.items():
             try:
                 # Get up_direction for cache key
@@ -91,10 +87,8 @@ class ShapePreparer:
                 FreeCAD.Console.PrintError(f"Could not create boundary for '{master_obj.Label}', it will be skipped. Error: {e}\n{traceback.format_exc()}\n")
                 continue
         
-        # --- Step 1.5: Sort masters and position them ---
         self._arrange_masters(masters_to_place, spacing)
 
-        # --- Step 2: Create in-memory Shape instances ---
         parts_to_nest = self._create_nesting_instances(
             master_shapes_map, 
             quantities, 
@@ -137,7 +131,6 @@ class ShapePreparer:
                     original_container = parent
                     break
         
-        # 1. Create new temp container
         temp_container = self.doc.addObject("App::Part", f"temp_master_{original_label}")
         master_shapes_group.addObject(temp_container)
         
@@ -153,7 +146,6 @@ class ShapePreparer:
                  (bb.ZMin + bb.ZMax) / 2
             )
         
-        # 2. Create the shape object - copy geometry, center at origin with -source_centroid
         temp_master_obj = self.doc.addObject("Part::Feature", f"temp_shape_{original_label}")
         temp_master_obj.Label = f"master_shape_{original_label}"
         temp_master_obj.Shape = master_obj.Shape.copy()
@@ -162,7 +154,6 @@ class ShapePreparer:
         temp_master_obj.Placement = FreeCAD.Placement(source_centroid.negative(), FreeCAD.Rotation())
         temp_container.addObject(temp_master_obj)
         
-        # 3. Clone Boundary Object
         if hasattr(master_obj, "BoundaryObject") and master_obj.BoundaryObject:
             temp_bound = self.doc.addObject("Part::Feature", f"temp_boundary_{original_label}")
             temp_bound.Shape = master_obj.BoundaryObject.Shape.copy()
@@ -181,7 +172,6 @@ class ShapePreparer:
         if hasattr(temp_container, "ViewObject"): 
             temp_container.ViewObject.Visibility = True
 
-        # 4. Copy Quantity property
         part_params = quantities.get(original_label, {'quantity': 1})
         if isinstance(part_params, tuple):
             quantity = part_params[0]
@@ -189,7 +179,6 @@ class ShapePreparer:
             quantity = part_params.get('quantity', 1)
         temp_container.addProperty("App::PropertyInteger", "Quantity", "Nest", "Number of instances").Quantity = quantity
 
-        # 5. Build Shape wrapper using the stored SourceCentroid
         temp_shape_wrapper = None
         if hasattr(temp_master_obj, "BoundaryObject") and temp_master_obj.BoundaryObject:
             try:
@@ -224,7 +213,6 @@ class ShapePreparer:
                 FreeCAD.Console.PrintWarning(f"Shape reload failed for '{label}': {e}\n{traceback.format_exc()}. Recalculating.\n")
                 temp_shape_wrapper = None
         
-        # 6. Recalculate if reuse failed
         if not temp_shape_wrapper:
             temp_shape_wrapper = Shape(temp_master_obj)
             shape_processor.create_single_nesting_part(temp_shape_wrapper, temp_master_obj, spacing, deflection, simplification, verbose=verbose)
@@ -236,7 +224,6 @@ class ShapePreparer:
         return temp_master_obj, temp_shape_wrapper
 
     def _handle_new_master(self, master_obj, label, quantities, temp_shape_wrapper, spacing, deflection, simplification, cache_key, master_shapes_group, is_reloading, verbose=False):
-        # 1. Prepare Shape wrapper if not already in cache
         if not temp_shape_wrapper:
             # Get up_direction for initial processing
             part_params = quantities.get(label, {'up_direction': 'Z+'})
@@ -246,7 +233,6 @@ class ShapePreparer:
             shape_processor.create_single_nesting_part(temp_shape_wrapper, master_obj, spacing, deflection, simplification, up_direction, verbose=verbose)
             self.processed_shape_cache[cache_key] = copy.deepcopy(temp_shape_wrapper)
 
-        # 2. Determine Source Centroid
         if temp_shape_wrapper.source_centroid is not None:
             source_centroid = temp_shape_wrapper.source_centroid
         else:
@@ -257,17 +243,14 @@ class ShapePreparer:
             bb = temp_shape.BoundBox
             source_centroid = FreeCAD.Vector((bb.XMin + bb.XMax) / 2, (bb.YMin + bb.YMax) / 2, (bb.ZMin + bb.ZMax) / 2)
 
-        # 3. Create Master Container
         master_container, up_direction = self._create_master_container(label, quantities, source_centroid)
         
-        # 4. Create Master Shape Object
         master_shape_obj = self.doc.addObject("Part::Feature", f"master_shape_{label}")
         if not hasattr(master_shape_obj, "ShowBounds"):
             master_shape_obj.addProperty("App::PropertyBool", "ShowBounds", "Display", "").ShowBounds = False
         if not hasattr(master_shape_obj, "BoundaryObject"):
             master_shape_obj.addProperty("App::PropertyLink", "BoundaryObject", "Nesting", "")
         
-        # 5. Position and rotate geometry
         original_shape = master_obj.Shape.copy()
         if verbose:
             FreeCAD.Console.PrintMessage(f"  -> Creating master for '{label}' (type: {master_obj.TypeId}) with up_direction='{up_direction}'\n")
@@ -286,7 +269,6 @@ class ShapePreparer:
             master_shape_obj.ViewObject.Visibility = True
         master_container.addObject(master_shape_obj)
 
-        # 6. Finalize
         self._create_boundary_object(master_container, master_shape_obj, temp_shape_wrapper, verbose)
         master_shapes_group.addObject(master_container)
         

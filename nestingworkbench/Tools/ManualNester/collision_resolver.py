@@ -14,7 +14,6 @@ Collision detection uses a two-phase approach:
      precise answer.  Falls back to bbox-only when no polygon is available.
 """
 
-
 class CollisionResolver:
     def __init__(self):
         self._cache = {}  # id(obj) -> entry dict with 'bbox' and 'poly' keys
@@ -172,7 +171,6 @@ class CollisionResolver:
                 return True
         return False
 
-
     def overlaps_any(self, obj, others):
         """Returns True if obj overlaps any shape in others."""
         entry = self._get_entry(obj)
@@ -186,9 +184,7 @@ class CollisionResolver:
                 return True
         return False
 
-    # ------------------------------------------------------------------
     # Internal cache helpers
-    # ------------------------------------------------------------------
 
     def _get_logical_pos(self, obj):
         """Return (x, y) logical position from cache, falling back to obj.Placement.Base."""
@@ -205,9 +201,7 @@ class CollisionResolver:
             return cached[0], cached[1]
         return 0.0, 0.0
 
-    # ------------------------------------------------------------------
     # Key-based methods (worker-thread safe — no FreeCAD object refs)
-    # ------------------------------------------------------------------
 
     def _translate_key(self, key, dx, dy):
         """Translate a cache entry by (dx, dy) using integer key instead of obj ref."""
@@ -394,7 +388,6 @@ class CollisionResolver:
             return self._cache[key]
         return self._compute_entry(obj)
 
-
     def _compute_entry(self, obj):
         """Compute bbox dict + Shapely polygon for obj. Returns None if no shape found."""
         placement, shape = self._find_shape_with_placement(obj, None)
@@ -413,9 +406,7 @@ class CollisionResolver:
         poly = self._poly_from_shape(shape, placement)
         return {'bbox': bbox, 'poly': poly}
 
-    # ------------------------------------------------------------------
     # Shape / placement traversal
-    # ------------------------------------------------------------------
 
     def _find_shape_with_placement(self, obj, parent_placement):
         """Return (accumulated_placement, Shape) or (None, None).
@@ -433,27 +424,22 @@ class CollisionResolver:
         else:
             current = parent_placement.multiply(obj.Placement)
 
-        # 1. Prioritize BoundaryObject — it holds the simplified boundary polygon.
         if hasattr(obj, "BoundaryObject") and obj.BoundaryObject and hasattr(obj.BoundaryObject, "Shape"):
             full = current.multiply(obj.BoundaryObject.Placement)
             return full, obj.BoundaryObject.Shape
 
-        # 2. Recurse into App::Part / container groups BEFORE raw Shape.
         if hasattr(obj, "Group"):
             for child in obj.Group:
                 result_placement, result_shape = self._find_shape_with_placement(child, current)
                 if result_shape:
                     return result_placement, result_shape
 
-        # 3. Fallback: raw Shape (leaf Part::Feature objects only).
         if hasattr(obj, "Shape") and obj.Shape:
             return current, obj.Shape
 
         return None, None
 
-    # ------------------------------------------------------------------
     # Polygon extraction
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _poly_from_shape(shape, placement):
@@ -492,9 +478,7 @@ class CollisionResolver:
         except Exception:
             return None
 
-    # ------------------------------------------------------------------
     # Intersection tests
-    # ------------------------------------------------------------------
 
     def _entries_intersect(self, entry_a, entry_b):
         """Two-phase intersection test.
@@ -513,9 +497,7 @@ class CollisionResolver:
             return poly_a.intersects(poly_b)
         return True  # no polygon — conservatively treat bbox overlap as intersection
 
-    # ------------------------------------------------------------------
     # Geometry utilities
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _transform_bbox(bb, placement):

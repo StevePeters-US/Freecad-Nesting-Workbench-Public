@@ -54,7 +54,6 @@ class BaseNester(object):
         self.parts_to_place = list(parts)
         self.sheets = []
         
-        # Sort biggest first
         if sort:
             self.parts_to_place.sort(key=lambda p: p.area, reverse=True)
         
@@ -70,11 +69,9 @@ class BaseNester(object):
                 self.progress_callback(i + 1, total_count, f"Placing {part.id}...")
 
             placed = False
-            # 1. Try existing sheets
             for sheet in self.sheets:
                 placed_shape = self._try_place_part_on_sheet(part, sheet)
                 if placed_shape:
-                    # Final placement on sheet origin
                     sheet_origin = sheet.get_origin()
                     placed_shape.placement = placed_shape.get_final_placement(sheet_origin)
                     sheet.add_part(PlacedPart(placed_shape))
@@ -85,7 +82,6 @@ class BaseNester(object):
                     placed = True
                     break
             
-            # 2. Try new sheet
             if not placed:
                 new_sheet = Sheet(len(self.sheets), self._bin_width, self._bin_height)
                 placed_shape = self._try_place_part_on_sheet(part, new_sheet)
@@ -130,7 +126,6 @@ class BaseNester(object):
         base_perp_dir = (-direction[1], direction[0])
         initial_side = random.choice([1, -1])
 
-        # the baseline to beat
         starting_score = self._evaluate_placement(part, direction)
         best_score = starting_score
         best_state = (initial_x, initial_y, initial_angle)
@@ -138,10 +133,8 @@ class BaseNester(object):
         current_state = best_state
         
         # Minimum improvement required to be considered an "advantage" 
-        # Prevents infinite loops due to floating point noise.
         EPSILON = self.stability_tolerance
 
-        # LOGGING
         if self.verbose:
             self.log(f"--- Annealing Cycle Start for {part.id} ---")
             self.log(f"  Pos Steps: {self.anneal_steps}, Rot Steps per Pos: {self.anneal_rot_steps}")
@@ -154,7 +147,6 @@ class BaseNester(object):
             p = (i + 1) / self.anneal_steps
             amplitude = self.anneal_min_amp + (self.anneal_max_amp - self.anneal_min_amp) * self._get_curve_p(p, self.anneal_curve)
             
-            # --- 1. SHAKE (Pick a new candidate position) ---
             part.move_to(current_state[0], current_state[1])
             part.set_rotation(current_state[2])
 
@@ -170,7 +162,6 @@ class BaseNester(object):
 
             cand_x, cand_y, _, _ = part.bounding_box()
 
-            # --- 2. ROTATION JITTER (Offsetting from previous best) ---
             # Shrinks from Max down to Min as i progresses (Inverted Curve)
             rot_amp = self.anneal_rot_min + (self.anneal_rot_max - self.anneal_rot_min) * self._get_curve_p(1.0 - p, self.anneal_rot_curve)
             
@@ -181,7 +172,6 @@ class BaseNester(object):
 
             for r in range(rot_loops):
                 if rotate_enabled and self.anneal_rot_steps > 0:
-                    # Random Walk: Jitter around the CURRENT best orientation
                     jitter = random.uniform(-rot_amp, rot_amp)
                     target_angle = current_state[2] + jitter
                 else:
@@ -205,7 +195,6 @@ class BaseNester(object):
                         pos_best_score = score
                         pos_best_angle = target_angle
 
-            # --- 3. EVALUATE JUMP (Internal walk progress) ---
             if pos_best_angle is not None:
                 current_state = (cand_x, cand_y, pos_best_angle)
                 part.set_rotation(pos_best_angle) 
@@ -222,7 +211,6 @@ class BaseNester(object):
                 if self.verbose:
                     self.log(f"  PosStep {i:2d}: Invalid")
         
-        # Final result check
         if best_score > starting_score + EPSILON:
             if self.verbose:
                 self.log(f"Annealing finished with improvement. Best Score: {best_score:10.6f}")

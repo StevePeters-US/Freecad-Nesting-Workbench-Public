@@ -7,7 +7,6 @@ Consolidates common logic that was previously duplicated in multiple modules.
 
 import FreeCAD
 
-
 def get_up_direction_rotation(up_direction):
     """
     Returns a FreeCAD.Rotation that transforms the given up_direction to Z+.
@@ -34,7 +33,6 @@ def get_up_direction_rotation(up_direction):
     else:
         FreeCAD.Console.PrintWarning(f"Unknown up_direction '{up_direction}', using Z+\n")
         return FreeCAD.Rotation()
-
 
 def recursive_delete(doc, obj, protected_names=None):
     """
@@ -69,7 +67,6 @@ def recursive_delete(doc, obj, protected_names=None):
     except Exception:
         pass  # Already deleted
 
-
 def get_layout_group(doc):
     """
     Finds the most relevant layout group in the active document.
@@ -101,7 +98,6 @@ def get_layout_group(doc):
 
     return None
 
-
 def get_sheet_groups(layout_group):
     """
     Gets all the direct child Sheet groups from a layout group, sorted numerically.
@@ -118,7 +114,6 @@ def get_sheet_groups(layout_group):
     sheet_groups = [obj for obj in layout_group.Group if obj.Label.startswith("Sheet_")]
     sheet_groups.sort(key=lambda g: int(g.Label.split('_')[1]))
     return sheet_groups
-
 
 def get_all_objects_recursive(group):
     """

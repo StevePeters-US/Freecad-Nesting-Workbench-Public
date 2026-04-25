@@ -104,14 +104,9 @@ class NestingJob:
 
         return job
 
-
-
     def commit(self):
         """Promotes the temporary results to the target layout."""
         
-        # 1. Clean Target of old results (Sheets)
-        # We do NOT remove MasterShapes unless we have new ones to replace them?
-        # Current logic: If we re-ran, we overwrite sheets.
         to_remove = []
         for child in self.target_layout.Group:
             if child.Label.startswith("Sheet_"):
@@ -120,11 +115,9 @@ class NestingJob:
         for child in to_remove:
             recursive_delete(self.doc, child)
             
-        # 2. Check for new MasterShapes in Temp
         temp_masters = next((c for c in self.temp_layout.Group if c.Label.startswith("MasterShapes")), None)
         
         if temp_masters and len(temp_masters.Group) > 0:
-            # We have new masters, replace old ones in Target
             old_masters = next((c for c in self.target_layout.Group if c.Label.startswith("MasterShapes")), None)
             if old_masters:
                 recursive_delete(self.doc, old_masters)
@@ -139,11 +132,9 @@ class NestingJob:
             self.target_layout.addObject(temp_masters)
             
         else:
-            # No new masters, if temp has empty master group, delete it
             if temp_masters:
                 recursive_delete(self.doc, temp_masters)
 
-        # 3. Move Sheets from Temp to Target
         # IMPORTANT: explicitly removeObject from temp first, because FreeCAD's addObject
         # does NOT automatically remove from the old group. If sheets remain in
         # temp_layout.Group when cleanup() calls recursive_delete(temp_layout), it will
@@ -153,12 +144,8 @@ class NestingJob:
             self.temp_layout.removeObject(sheet)
             self.target_layout.addObject(sheet)
 
-        # 4. Clean up Temp (Sandbox)
-        # PartsToPlace should be empty of placed parts due to unlinking in Sheet.draw
-        # Any unplaced parts remain there and will be deleted.
         self.cleanup()
         
-        # 5. Apply Properties to Target
         self._apply_properties(self.target_layout)
         
         return self.target_layout
@@ -174,16 +161,13 @@ class NestingJob:
         self.temp_layout = None
         self.parts_group = None
 
-
-
-
     def _apply_properties(self, layout_obj):
         p = self.params
         self._set_prop(layout_obj, PROP_LENGTH, PROP_SHEET_WIDTH, p['sheet_width'])
         self._set_prop(layout_obj, PROP_LENGTH, PROP_SHEET_HEIGHT, p['sheet_height'])
         self._set_prop(layout_obj, PROP_LENGTH, PROP_PART_SPACING, p['spacing'])
         self._set_prop(layout_obj, PROP_LENGTH, PROP_SHEET_THICKNESS, p['sheet_thickness'])
-        self._set_prop(layout_obj, PROP_FLOAT, PROP_DEFLECTION_ANGLE, p.get('deflection_angle', 30))  # Save angle in degrees
+        self._set_prop(layout_obj, PROP_FLOAT, PROP_DEFLECTION_ANGLE, p.get('deflection_angle', 30))
         self._set_prop(layout_obj, PROP_FLOAT, PROP_SIMPLIFICATION, p.get('simplification', 1.0))
         self._set_prop(layout_obj, PROP_FILE, PROP_FONT_FILE, p['font_path'])
         self._set_prop(layout_obj, PROP_BOOL, PROP_SHOW_BOUNDS, p['show_bounds'])
@@ -204,7 +188,6 @@ class NestingJob:
         if not hasattr(obj, name):
             obj.addProperty(type_str, name, "Layout", "")
         setattr(obj, name, val)
-
 
 class NestingController:
     """
@@ -235,19 +218,15 @@ class NestingController:
             self.current_job.cleanup()
             self.current_job = None
 
-        # Clear stale caches from previous nesting runs
         Shape.clear_caches()
 
-        # 1. Ensure Target Layout Exists (Create default if needed)
         target_layout = self._ensure_target_layout()
         if not target_layout:
              return # Standard error handled in helper
              
-        # Hide target during operation
         if hasattr(target_layout, "ViewObject"):
             target_layout.ViewObject.Visibility = False
 
-        # 2. Collect Parameters
         ui_params = self._collect_ui_params()
         ui_params, quantities, master_map, rotation_params = self._collect_job_parameters(ui_params)
         
@@ -256,7 +235,6 @@ class NestingController:
         verbose = self.ui.verbose_logging_checkbox.isChecked()
         algo_kwargs['verbose'] = verbose
         
-        # VERIFICATION LOGS for the user
         rot_steps = ui_params.get('rotation_steps', 1)
         ann_steps = algo_kwargs.get('anneal_steps', 25) if ui_params.get('algorithm') == 'Physics' else 0
         FreeCAD.Console.PrintMessage(f"Algorithm Selected: {ui_params.get('algorithm', 'Unknown')}\n")
@@ -265,14 +243,10 @@ class NestingController:
         
         algo_kwargs['cancel_callback'] = self._check_cancel
         
-        # Persist verbose setting
         prefs = FreeCAD.ParamGet(PREFS_PATH)
         prefs.SetBool("VerboseLogging", verbose)
         
-        # 3. Execute nesting using unified GA path
-        # (population=1, generations=1 is equivalent to standard nesting)
         
-        # Define progress callback
         def progress_cb(current, total, message=None):
             try:
                 self.ui.update_progress(current, total, message)
@@ -299,7 +273,6 @@ class NestingController:
             self.ui.nest_button.setEnabled(False)
             return
 
-        # Check if a layout group is selected
         first_selected = selection[0]
         if first_selected.isDerivedFrom("App::DocumentObjectGroup") and first_selected.Label.startswith("Layout_"):
             FreeCAD.Console.PrintMessage(f"  -> Detected layout selection: {first_selected.Label}\n")
@@ -315,10 +288,8 @@ class NestingController:
         self.ui.selected_shapes_to_process = []
         self.ui.hidden_originals = []
 
-        # 1. Load Parameters (CR-116: use getattr(..., None))
         self._load_params_from_layout(layout_group)
         
-        # 2. Load Shapes
         self._load_shapes_from_layout(layout_group)
 
     def _load_params_from_layout(self, layout_group):
@@ -339,14 +310,12 @@ class NestingController:
             val = getattr(layout_group, prop, None)
             if val is not None: widget.setValue(val)
             
-        # Deflection (Special handling)
         deflection_angle = getattr(layout_group, PROP_DEFLECTION_ANGLE, None)
         if deflection_angle is not None:
             self.ui.deflection_input.setValue(deflection_angle)
         elif hasattr(layout_group, 'Deflection'):
             self.ui.deflection_input.setValue(layout_group.Deflection * 200.0)
             
-        # Checkboxes/Labels
         use_gpu = getattr(layout_group, PROP_USE_GPU, None)
         if use_gpu is not None: self.ui.use_gpu_checkbox.setChecked(use_gpu)
         
@@ -355,7 +324,6 @@ class NestingController:
             self.ui.selected_font_path = font_path
             self.ui.font_label.setText(os.path.basename(font_path))
 
-        # Global Rotation Steps
         steps = getattr(layout_group, PROP_GLOBAL_ROTATION_STEPS, 0)
         if steps > 0:
             target_angle = 360.0 / steps
@@ -395,7 +363,6 @@ class NestingController:
                 
                 quantities[label] = getattr(master, "Quantity", 1)
                 
-                # Use helper to restore params (CR-108b hint)
                 overrides[label] = getattr(master, "PartRotationOverride", [])
                 steps_map[label] = getattr(master, "PartRotationSteps", 0)
                 up_dirs[label] = getattr(master, "UpDirection", "Z+")
@@ -457,10 +424,8 @@ class NestingController:
         """Loads a selection of shapes into the UI."""
         self.ui.nest_button.setEnabled(True)
         
-        # Dictionary to store counts from selection
         selection_counts = {}
 
-        # Extract individual parts from assemblies/groups
         if not is_reloading_layout:
             extracted = self._extract_parts_from_selection(selection)
             if extracted:
@@ -474,7 +439,6 @@ class NestingController:
                 selection = extracted
                 FreeCAD.Console.PrintMessage(f"  -> Extracted {len(selection)} parts from selection.\n")
         
-        # Keep unique, preserve order
         self.ui.selected_shapes_to_process = list(dict.fromkeys(selection)) 
         
         if not is_reloading_layout:
@@ -487,10 +451,8 @@ class NestingController:
             if display_label.startswith("master_shape_"):
                 display_label = display_label.replace("master_shape_", "")
             
-            # Default to 1, or use selection count if available
             qty = selection_counts.get(obj, 1)
             
-            # Allow initial_quantities to override (e.g. from saved layout)
             if initial_quantities and obj.Label in initial_quantities:
                 qty = initial_quantities[obj.Label]
                 
@@ -509,7 +471,6 @@ class NestingController:
             if initial_fill_sheet and obj.Label in initial_fill_sheet:
                 fill = initial_fill_sheet[obj.Label]
 
-            # We assume add_part_row is on UI
             add_row_fn = getattr(self.ui, 'add_part_row', getattr(self.ui, '_add_part_row', None))
             if add_row_fn:
                  add_row_fn(i, display_label, quantity=qty, rotation_steps=steps, 
@@ -525,7 +486,6 @@ class NestingController:
             self.ui.status_label.setText("Select shapes in the 3D view or tree to add them.")
             return
 
-        # Handle assemblies in selection
         extracted = self._extract_parts_from_selection(selection)
         selection_counts = {}
         if extracted:
@@ -537,7 +497,6 @@ class NestingController:
         
         added_count = 0
         
-        # Process unique objects from selection
         unique_selection = list(dict.fromkeys(selection))
         
         for obj in unique_selection:
@@ -545,7 +504,6 @@ class NestingController:
                 row_position = self.ui.shape_table.rowCount()
                 self.ui.shape_table.insertRow(row_position)
                 
-                # Determine quantity from selection count
                 qty = selection_counts.get(obj, 1)
                 
                 add_row_fn = getattr(self.ui, 'add_part_row', getattr(self.ui, '_add_part_row', None))
@@ -558,7 +516,6 @@ class NestingController:
         self.ui.shape_table.resizeColumnsToContents()
         self.ui.status_label.setText(f"Added {added_count} new shape(s).")
 
-        # Enable the nest button if any shapes are now in the table
         if self.ui.shape_table.rowCount() > 0:
             self.ui.nest_button.setEnabled(True)
 
@@ -572,7 +529,6 @@ class NestingController:
             self.ui.shape_table.removeRow(row)
         self.ui.status_label.setText(f"Removed {len(selected_rows)} shape(s).")
 
-        # Disable the nest button if the table is now empty
         if self.ui.shape_table.rowCount() == 0:
             self.ui.nest_button.setEnabled(False)
 
@@ -588,7 +544,6 @@ class NestingController:
                 angle = angles[idx]
                 return int(360 / angle)
         else:
-            # Minkowski mapping
             idx = self.ui.minkowski_rotation_steps_slider.value()
             angles = self.ui.rotation_angles
             if idx < len(angles):
@@ -600,7 +555,6 @@ class NestingController:
                             rotation_params, algo_kwargs, is_simulating, viz_manager=None):
         """GA optimization on a background thread."""
         
-        # 1. Create worker (but don't start yet)
         self._worker = NestingWorker(
             coordinator=None, # Set below
             run_args=(target_layout, ui_params, quantities, master_map,
@@ -609,7 +563,6 @@ class NestingController:
             parent=None
         )
         
-        # 2. Create coordinator bound to worker
         coordinator = GACoordinator(
             doc=self.doc,
             shape_preparer=self.shape_preparer,
@@ -624,14 +577,12 @@ class NestingController:
         )
         self._worker.coordinator = coordinator
         
-        # 3. Connect signals
         self._worker.status_changed.connect(lambda msg: self.ui.status_label.setText(msg))
         self._worker.progress_updated.connect(lambda c, t, m: self.ui.update_progress(c, t, m))
         self._worker.draw_requested.connect(self._handle_draw_request)
         self._worker.finished_signal.connect(self._on_nesting_finished)
         self._worker.error_signal.connect(self._on_nesting_error)
         
-        # 4. Start thread
         self._worker.start()
 
     def _handle_draw_request(self, payload):
@@ -640,7 +591,6 @@ class NestingController:
             if payload.get('updateGui_only'):
                 FreeCADGui.updateGui()
             elif payload.get('create_population'):
-                # Execute population creation on main thread
                 layouts = self._worker.coordinator.layout_manager.create_ga_population(
                     payload['master_map'], payload['quantities'], 
                     payload['ui_params'], payload['population_size'],
@@ -648,7 +598,6 @@ class NestingController:
                 )
                 self._worker.coordinator._pending_layouts = layouts
             elif payload.get('build_next_generation'):
-                # Execute next-gen building on main thread
                 layouts = self._worker.coordinator._build_next_generation(
                     payload['gen'], payload['layouts'], payload['elites'], 
                     payload['master_map'], payload['quantities'], payload['ui_params'], 
@@ -657,7 +606,6 @@ class NestingController:
                 )
                 self._worker.coordinator._pending_layouts = layouts
             elif payload.get('cleanup_layouts'):
-                # Execute final cleanup on main thread
                 for layout in payload['layouts']:
                     if layout != payload['best_layout']:
                         self._worker.coordinator.layout_manager.delete_layout(layout, verbose=payload.get('verbose', False))
@@ -688,7 +636,6 @@ class NestingController:
     def _on_nesting_finished(self, job):
         """Main-thread handler for nesting completion."""
         if self.cancel_requested:
-            # Nesting was cancelled — clean up instead of keeping result
             if job:
                 job.cleanup()
             self.cancel_job()
@@ -718,10 +665,8 @@ class NestingController:
         if self.current_job:
             final_layout = self.current_job.commit()
             
-            # Update UI reference so toggle_bounds works on the new layout
             self.ui.current_layout = final_layout
             
-            # Ensure layout is visible and MasterShapes is hidden
             if final_layout and hasattr(final_layout, "ViewObject"):
                 final_layout.ViewObject.Visibility = True
                 
@@ -760,38 +705,30 @@ class NestingController:
     def cancel_job(self):
         """Called when User clicks Cancel."""
         if self.current_job:
-            # Capture target and ensure it's not deleted during cleanup
             target = self.current_job.target_layout
             
-            # Run cleanup
             self.current_job.cleanup()
             
-            # Restore visibility of original target
             if target:
                 try: 
-                    # Check if target layout is empty (newly created, never committed to)
                     has_content = any(
                         child.Label.startswith("Sheet_") or child.Label.startswith("MasterShapes")
                         for child in (target.Group if hasattr(target, "Group") else [])
                     )
                     
                     if not has_content:
-                        # Empty layout - was created by _ensure_target_layout but never used
                         recursive_delete(self.doc, target)
                         if hasattr(self.ui, 'current_layout') and self.ui.current_layout == target:
                             self.ui.current_layout = None
                         FreeCAD.Console.PrintMessage("Removed empty target layout.\n")
                     else:
-                        # Has content - restore visibility
                         if hasattr(target, "ViewObject"):
                             target.ViewObject.Visibility = True
                         
                         if hasattr(target, "Group"):
                             for child in target.Group:
-                                # Show Sheets
                                 if child.Label.startswith("Sheet_") and hasattr(child, "ViewObject"):
                                     child.ViewObject.Visibility = True
-                                # Hide MasterShapes
                                 if child.Label.startswith("MasterShapes") and hasattr(child, "ViewObject"):
                                     child.ViewObject.Visibility = False
                 except Exception as e:
@@ -821,19 +758,16 @@ class NestingController:
             nonlocal found_count
             indent = "  " * depth
             
-            # Check for boundary objects that are children (by label)
             if obj.Label.startswith("boundary_"):
                 found_count += 1
                 if hasattr(obj, "ViewObject"):
                     obj.ViewObject.Visibility = is_visible
                     
-            # Check for linked BoundaryObject property
             if hasattr(obj, "BoundaryObject") and obj.BoundaryObject:
                 found_count += 1
                 if hasattr(obj.BoundaryObject, "ViewObject"):
                     obj.BoundaryObject.ViewObject.Visibility = is_visible
                 
-            # Recurse into children
             if hasattr(obj, "Group"):
                 for child in obj.Group:
                     set_show_bounds(child, depth + 1)
@@ -845,7 +779,6 @@ class NestingController:
         """Determines the target layout, creating a default one if none exists."""
         target = getattr(self.ui, 'current_layout', None)
         
-        # Validate existing
         if target:
             try:
                 if target not in self.doc.Objects: target = None
@@ -853,13 +786,11 @@ class NestingController:
                 FreeCAD.Console.PrintWarning(f"[NestingController] Target validation failed: {e}\n")
                 target = None
             
-        # Infer from selection
         if not target and hasattr(self.ui, 'selected_shapes_to_process') and self.ui.selected_shapes_to_process:
              # Logic to find parent layout derived previously...
              # Simplified for brevity/robustness
              pass 
 
-        # Create Default
         if not target:
             base_name = "Layout"
             i = 0
@@ -880,10 +811,9 @@ class NestingController:
             'sheet_height': self.ui.sheet_height_input.value(),
             'spacing': self.ui.part_spacing_input.value(),
             'sheet_thickness': self.ui.sheet_thickness_input.value(),
-            'deflection': deflection_mm,  # Linear deflection for processing
-            'deflection_angle': deflection_angle,  # Angle for persistence
+            'deflection': deflection_mm,
+            'deflection_angle': deflection_angle,
             'simplification': self.ui.simplification_input.value(),
-            # Rotation steps calculation
             'rotation_steps': self._get_rotation_steps(),
             'add_labels': self.ui.add_labels_checkbox.isChecked(),
             'font_path': getattr(self.ui, 'selected_font_path', None),
@@ -906,7 +836,6 @@ class NestingController:
             'anneal_rot_max': self.ui.physics_anneal_rot_max.value()
         }
         
-        # Save persistence
         self.save_settings(settings_dict)
         
         return settings_dict
@@ -921,7 +850,6 @@ class NestingController:
         prefs.SetFloat(PROP_DEFLECTION_ANGLE, float(settings.get('deflection_angle', 10)))  # Save angle, not mm
         prefs.SetFloat(PROP_SIMPLIFICATION, float(settings['simplification']))
         
-        # Save both isolated rotation settings
         mink_steps = int(360 / self.ui.rotation_angles[self.ui.minkowski_rotation_steps_slider.value()])
         prefs.SetInt("MinkowskiRotationSteps", mink_steps)
         
@@ -947,7 +875,6 @@ class NestingController:
              prefs.SetString("FontPath", str(settings['font_path']))
 
     def _collect_job_parameters(self, ui_settings):
-        # Re-implementation of collecting quantities and master map from UI table
         quantities = {}
         master_map = {}
         rotation_params = {}
@@ -963,14 +890,12 @@ class NestingController:
                 rot_val = rot_widget.findChild(QtGui.QSpinBox).value()
                 override = self.ui.shape_table.cellWidget(row, 3).isChecked()
                 
-                # Get new parameters
                 up_dir_combo = self.ui.shape_table.cellWidget(row, 4)
                 up_direction = up_dir_combo.currentText() if up_dir_combo else "Z+"
                 
                 fill_checkbox = self.ui.shape_table.cellWidget(row, 5)
                 fill_sheet = fill_checkbox.isChecked() if fill_checkbox else False
                 
-                # Store quantity with effective rotation (based on override) and new params
                 quantities[label] = {
                     'quantity': qty,
                     'rotation_steps': rot_val if override else global_rot,
@@ -978,13 +903,11 @@ class NestingController:
                     'fill_sheet': fill_sheet
                 }
                 
-                # Store rotation params (value AND override flag) for persistence
                 rotation_params[label] = (rot_val, override)
             except Exception as e:
                 FreeCAD.Console.PrintWarning(f"[NestingController] Skipping row {row} in shape table: {e}\n")
                 continue
             
-        # Map objects
         for obj in self.ui.selected_shapes_to_process:
              try:
                  lbl = obj.Label.replace("master_shape_", "")
@@ -1081,7 +1004,6 @@ class NestingController:
                     python_exe = exe_path
                     break
 
-            # Run pip install
             # Use --no-warn-script-location to avoid warnings about PATH
             cmd = [python_exe, "-m", "pip", "install", "taichi", "--user", "--no-warn-script-location"]
             result = subprocess.run(cmd, capture_output=True, text=True)

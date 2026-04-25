@@ -14,7 +14,6 @@ from .physics_engine import PhysicsEngine
 from .collision_resolver import CollisionResolver
 from .input_manager import InputManager
 
-
 def _compute_physics_frame(
     working_cache,
     working_base,
@@ -219,7 +218,6 @@ class ManualNesterToolObserver:
         self._coin_disp_nodes = {}   # id(obj) -> (SoTranslation, obj)
         self._coin_disp_starts = {}  # id(obj) -> (start_x, start_y)
 
-        # --- Input Manager ---
         self.input = InputManager(view)
         self.input.on("click", self.handle_click)
         self.input.on("release", self.handle_release)
@@ -257,7 +255,6 @@ class ManualNesterToolObserver:
                 lambda val: setattr(self.physics_engine, 'strength', val)
             )
 
-        # 1. Infer Layout Group
         selection = FreeCADGui.Selection.getSelection()
         if selection and selection[0].isDerivedFrom("App::DocumentObjectGroup") and (selection[0].Label.startswith("Layout_") or selection[0].Label == "Layout"):
             self.layout_group = selection[0]
@@ -269,17 +266,14 @@ class ManualNesterToolObserver:
             FreeCAD.Console.PrintWarning("Manual Nester: Could not find or create a Layout group.\n")
             return
 
-        # 2. Ensure MasterShapes group exists and is visible
         self.master_group = self._get_or_create_master_group()
         if self.master_group and hasattr(self.master_group, "ViewObject"):
             self.original_visibilities[self.master_group] = self.master_group.ViewObject.Visibility
             self.master_group.ViewObject.Visibility = True
 
-        # 3. Store original placements and manage visibility
         # Track objects in the layout
         self._track_layout_objects()
 
-        # 4. Always add a fresh drop-zone sheet
         self._add_drop_zone_sheet()
 
         # After changing visibilities, we need to update the GUI to reflect them.
@@ -380,7 +374,6 @@ class ManualNesterToolObserver:
                         self.original_visibilities[sheet_boundary.Name + "_selectable"] = sheet_boundary.ViewObject.Selectable
                         sheet_boundary.ViewObject.Selectable = False
 
-
     def _track_single_object(self, obj, sheet_group=None):
         self.original_placements[obj] = obj.Placement.copy()
         if sheet_group:
@@ -393,9 +386,7 @@ class ManualNesterToolObserver:
             if hasattr(obj.ViewObject, "Selectable"):
                 obj.ViewObject.Selectable = True
 
-    # ------------------------------------------------------------------
     # Input action handlers (registered with InputManager)
-    # ------------------------------------------------------------------
 
     def handle_click(self, pos):
         """On mouse down: Select object and start interaction."""
@@ -615,9 +606,7 @@ class ManualNesterToolObserver:
             self.start_placement = self.selected_obj.Placement.copy()
             self.start_pos = self.view.getPoint(pos[0], pos[1])
 
-    # ------------------------------------------------------------------
     # Deferred helpers (called via QTimer to avoid Coin3D scene-graph crashes)
-    # ------------------------------------------------------------------
 
     def _deferred_move_object_to_sheet(self, target_shapes_name, obj_name, old_shapes_name):
         """Move an object from one sheet's Shapes_ group to another."""
@@ -652,9 +641,7 @@ class ManualNesterToolObserver:
         except Exception as e:
             FreeCAD.Console.PrintWarning(f"[ManualNesterTool] Deferred revert failed: {e}\n")
 
-    # ------------------------------------------------------------------
     # Physics
-    # ------------------------------------------------------------------
 
     def _clamp_dragged_to_cursor_sheet(self, cursor_world_pos):
         """Clamp the dragged part to the sheet the cursor is over.
@@ -719,14 +706,11 @@ class ManualNesterToolObserver:
         if not dragged_info: return False
         dragged_center, _, _ = dragged_info
 
-        # 1. Centroid Attraction
         centroid_delta_deg = self._get_centroid_attraction_delta(dragged_center, drag_delta)
         if centroid_delta_deg is None: return False
 
-        # 2. Sheet-edge fitting
         edge_delta_deg, edge_weight = self._get_edge_alignment_delta(self.selected_obj)
 
-        # 3. Blend
         if edge_weight > 0.001:
             delta_deg = centroid_delta_deg * (1.0 - edge_weight) + edge_delta_deg * edge_weight
         else:
@@ -734,7 +718,6 @@ class ManualNesterToolObserver:
 
         if abs(delta_deg) < MIN_ANGLE_DEG: return False
 
-        # 4. Apply smooth incremental rotation
         speed_scale = min(1.0, drag_delta.Length / SPEED_SCALE_MM)
         apply_deg = delta_deg * SMOOTH * speed_scale
 
@@ -983,9 +966,7 @@ class ManualNesterToolObserver:
                 # Rotation changed the bbox — force a full re-prime next tick.
                 self.collision_resolver.invalidate(self.selected_obj)
 
-    # ------------------------------------------------------------------
     # Coin3D displacement nodes for physics-pushed parts
-    # ------------------------------------------------------------------
 
     def _ensure_coin_disp_node(self, obj):
         """Inject a SoTranslation at index 0 of obj's RootNode if not already done."""
@@ -1085,14 +1066,12 @@ class ManualNesterToolObserver:
         else:
             current_placement = parent_placement.multiply(obj.Placement)
 
-        # 1. Prioritize BoundaryObject link
         if hasattr(obj, "BoundaryObject") and obj.BoundaryObject and hasattr(obj.BoundaryObject.Shape, "BoundBox"):
             bb = obj.BoundaryObject.Shape.BoundBox
             # BoundaryObject placement is relative to its parent (obj)
             full_placement = current_placement.multiply(obj.BoundaryObject.Placement)
             return self._transform_bbox(bb, full_placement)
 
-        # 2. Recurse into App::Part / container groups BEFORE raw Shape,
         #    because container.Shape is a global compound (double-transform bug).
         if hasattr(obj, "Group"):
             for child in obj.Group:
@@ -1100,12 +1079,10 @@ class ManualNesterToolObserver:
                 if result:
                     return result
 
-        # 3. Fallback: raw Shape (only reached for leaf Part::Feature objects)
         if hasattr(obj, "Shape") and hasattr(obj.Shape, "BoundBox"):
             bb = obj.Shape.BoundBox
             return self._transform_bbox(bb, current_placement)
 
-        # 4. Strictly no bounds: One-time debug warning
         if obj.Name not in self.warned_missing_bounds:
             FreeCAD.Console.PrintWarning(f"Manual Nester: Part '{obj.Label}' has no bounds (BoundaryObject or Shape) and will not participate in collisions.\n")
             self.warned_missing_bounds.add(obj.Name)
@@ -1167,9 +1144,7 @@ class ManualNesterToolObserver:
 
         return None
 
-    # ------------------------------------------------------------------
     # Operation lifecycle
-    # ------------------------------------------------------------------
 
     def cancel_operation(self):
         if self.input.mode == "IDLE" and not self.input.is_free_grab:
@@ -1240,9 +1215,7 @@ class ManualNesterToolObserver:
         except Exception as e:
             FreeCAD.Console.PrintLog(f"[ManualNesterTool] Selection clear failed: {e}\n")
 
-    # ------------------------------------------------------------------
     # Object picking
-    # ------------------------------------------------------------------
 
     def pick_object(self, pos):
         """Helper to find the draggable object at screen pos."""
@@ -1281,7 +1254,6 @@ class ManualNesterToolObserver:
         Always returns the HIGHEST tracked container in the hierarchy.
         """
         visited = set()
-        # 1. Walk up parents to find the highest tracked container
         highest_tracked = None
         p = obj
         while p and p not in visited:
@@ -1307,7 +1279,6 @@ class ManualNesterToolObserver:
         if highest_tracked:
             return highest_tracked
 
-        # 3. Check specific links (Boundary/Label) as fallback
         for tracked_obj in self.original_placements.keys():
             if hasattr(tracked_obj, "BoundaryObject") and tracked_obj.BoundaryObject == obj:
                 return tracked_obj
@@ -1331,9 +1302,7 @@ class ManualNesterToolObserver:
                         stack.append(p)
         return ancestors
 
-    # ------------------------------------------------------------------
     # Session save / cancel / cleanup
-    # ------------------------------------------------------------------
 
     def save_placements(self):
         """Saves the new placements (implicitly applied to objects)."""
@@ -1378,8 +1347,6 @@ class ManualNesterToolObserver:
 
         FreeCAD.Console.PrintMessage("Manual Nester: Transformations cancelled and new items removed.\n")
 
-
-
     def cleanup(self):
         """Removes the event callbacks from the view and restores original visibilities."""
         self._stop_physics_timer()
@@ -1419,9 +1386,7 @@ class ManualNesterToolObserver:
         FreeCADGui.updateGui()
         self.layout_group = None
 
-    # ------------------------------------------------------------------
     # Sheet management
-    # ------------------------------------------------------------------
 
     def _find_sheet_at_pos(self, pos):
         """Finds the sheet group containing the given point."""
@@ -1501,8 +1466,6 @@ class ManualNesterToolObserver:
 
         offset_x = max_right + spacing if max_right > 0 else 0.0
 
-
-
         # Add Boundary
         boundary = doc.addObject("Part::Feature", f"Sheet_Boundary_{index}")
         import Part
@@ -1525,9 +1488,7 @@ class ManualNesterToolObserver:
         self.new_objects.append(shapes_group)
         return sheet_group
 
-    # ------------------------------------------------------------------
     # Coin3D overlays
-    # ------------------------------------------------------------------
 
     def _show_radius_indicator(self, center, radius):
         """M-010: Creates/updates a Coin3D indicator for the physics radius."""
@@ -1598,15 +1559,12 @@ class ManualNesterToolObserver:
                 pass  # Scene graph may already be torn down
             self.radius_indicator = None
 
-    # ------------------------------------------------------------------
     # Master shape cloning
-    # ------------------------------------------------------------------
 
     def _clone_part_from_master(self, master_obj):
         """Creates a clone of a master shape to be placed in the layout."""
         doc = self.layout_group.Document
 
-        # 1. Identify identifying properties from Master container (App::Part)
         master_container = master_obj
         if not master_obj.isDerivedFrom("App::Part"):
             if master_obj.InList:
@@ -1623,20 +1581,17 @@ class ManualNesterToolObserver:
                 break
         if not master_shape_feature: master_shape_feature = master_obj
 
-        # 2. Create the Nested Container (replicate NestingJob logic)
         part_label = master_container.Label.replace("master_", "")
         count = len(doc.findObjects(Label=f"nested_{part_label}_*")) + 1
 
         container = doc.addObject("App::Part", f"nested_{part_label}_{count}")
         container.Label = f"nested_{part_label}_{count}"
 
-        # 3. Create Shape Object
         nested_part = doc.addObject("Part::Feature", f"part_{part_label}_{count}")
         nested_part.Shape = master_shape_feature.Shape.copy()
         nested_part.Placement = master_shape_feature.Placement.copy()
         container.addObject(nested_part)
 
-        # 4. Copy Boundary if it exists
         if hasattr(master_shape_feature, "BoundaryObject") and master_shape_feature.BoundaryObject:
             bound_copy = doc.addObject("Part::Feature", f"boundary_{part_label}_{count}")
             bound_copy.Shape = master_shape_feature.BoundaryObject.Shape.copy()

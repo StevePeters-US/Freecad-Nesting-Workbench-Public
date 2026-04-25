@@ -79,7 +79,6 @@ class PlacementOptimizer:
                      f"nfp_assembly={dt_nfp:.0f}ms "
                      f"(placed={len(sheet.parts)} angles={len(angles)})")
 
-            # 2. Batch score on GPU
             res = self.engine.score_candidates_gpu(part, all_rotation_candidates)
             if res and res.get('metric', float('inf')) < best_result['metric']:
                 best_result = res
@@ -138,7 +137,6 @@ class PlacementOptimizer:
         t0 = _time.perf_counter()
         thread_id = threading.current_thread().name
         
-        # 1. Get Combined NFP from Engine (Incrementally Cached on Sheet)
         nfp_entry = self.engine.get_global_nfp_for(part, angle, sheet)
         t_nfp = _time.perf_counter()
         
@@ -152,7 +150,6 @@ class PlacementOptimizer:
         union_poly = nfp_entry['polygon']
         prepared_nfp = prep(union_poly) if not union_poly.is_empty else None
 
-        # 2. Generate Candidates — pass the already-computed nfp_entry to avoid a second call
         ext_cands = self._get_candidates_for_rotation(angle, part, sheet, nfp_entry=nfp_entry)
         if not len(ext_cands):
             return {'metric': float('inf')}
@@ -160,7 +157,6 @@ class PlacementOptimizer:
         rotated_poly = rotate(part.original_polygon, angle, origin='centroid')
         if not rotated_poly: return {'metric': float('inf')}
 
-        # 3. Score Candidates
         best = {'metric': float('inf')}
         rejected_nfp = 0
         rejected_bounds = 0
@@ -232,7 +228,6 @@ class PlacementOptimizer:
             filtered = nfp_pts[mask]
             return np.vstack([corners, filtered]) if len(filtered) else corners
         return corners
-
 
 class Nester:
     """
@@ -347,7 +342,6 @@ class Nester:
             if not quiet and self.part_start_callback:
                 self.part_start_callback(part)
 
-            # 1. Try existing sheets
             for sheet_idx, sheet in enumerate(sheets):
                 if (sheet.width * sheet.height - sheet.used_area) < part.area: continue
 
@@ -361,7 +355,6 @@ class Nester:
                         self.update_callback(part, sheet)
                     break
 
-            # 2. Try new sheet
             if not placed:
                 new_sheet = Sheet(len(sheets), self.bin_width, self.bin_height, spacing=self.spacing)
                 if self._attempt_placement_on_sheet(part, new_sheet):

@@ -17,7 +17,6 @@ except ImportError as e:
     nfp_gpu_taichi = None
 from ....datatypes.shape import Shape
 
-
 class MinkowskiEngine:
     """
     Handles geometric operations for Minkowski nesting, such as NFP generation,

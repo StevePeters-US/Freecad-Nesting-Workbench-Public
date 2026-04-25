@@ -16,7 +16,6 @@ from .shape_preparer import ShapePreparer
 from ...datatypes.shape import Shape
 from ...freecad_helpers import recursive_delete
 
-
 class Layout:
     """
     Represents a single layout attempt (population member in GA).
@@ -39,7 +38,6 @@ class Layout:
     @property
     def name(self):
         return self.layout_group.Label if self.layout_group else "unknown"
-
 
 class LayoutManager:
     """

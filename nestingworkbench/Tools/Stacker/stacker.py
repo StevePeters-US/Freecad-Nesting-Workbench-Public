@@ -19,8 +19,6 @@ class SheetStacker:
         else:
             self.layout_group = get_layout_group(self.doc)
 
-
-
     def _get_params_from_layout_group(self):
         """Reads layout parameters from the properties of the layout group."""
         if not self.layout_group:

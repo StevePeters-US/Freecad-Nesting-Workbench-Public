@@ -10,9 +10,6 @@ import FreeCAD
 import Part
 from ....freecad_helpers import get_up_direction_rotation
 
-
-
-
 def get_2d_profile_from_obj(obj, up_direction="Z+", tessellation_quality=0.1, simplification=1.0, verbose=False):
     """
     Extracts a usable 2D profile from a FreeCAD object by projecting it onto the XY plane.
@@ -231,7 +228,6 @@ def get_2d_profile_from_obj(obj, up_direction="Z+", tessellation_quality=0.1, si
     # If nothing worked
     raise ValueError(f"Unsupported object '{obj.Label}' or no valid 2D geometry found.")
 
-
 def create_single_nesting_part(shape_to_populate, shape_obj, spacing, deflection=0.05, simplification=1.0, up_direction="Z+", verbose=False):
     """
     Processes a FreeCAD object to generate a shapely-based boundary and populates
@@ -283,7 +279,6 @@ def create_single_nesting_part(shape_to_populate, shape_obj, spacing, deflection
     if profile_2d.is_empty:
         raise ValueError("2D Profile is empty.")
 
-    # --- Create final polygon with holes ---
     # Since get_2d_profile_from_obj now returns a full Shapely Polygon,
     # we can use it directly as the unbuffered base.
     # No need to re-discretize or reconstruct holes manualy!
@@ -307,7 +302,6 @@ def create_single_nesting_part(shape_to_populate, shape_obj, spacing, deflection
     if buffered_polygon.is_empty:
          raise ValueError("Buffering operation did not produce a valid polygon.")
 
-    # --- Post-processing to perfectly center all polygons at the origin ---
     # The buffering operation can shift the centroid of the resulting polygon.
     # For non-symmetrical shapes, this shift can be significant. We must re-center
     # both the buffered and unbuffered polygons so that their centroids are at (0,0).
@@ -319,7 +313,6 @@ def create_single_nesting_part(shape_to_populate, shape_obj, spacing, deflection
     final_buffered_polygon = translate(buffered_polygon, xoff=-buffered_centroid.x, yoff=-buffered_centroid.y)
     final_unbuffered_polygon = translate(final_polygon_unbuffered, xoff=-buffered_centroid.x, yoff=-buffered_centroid.y)
 
-    # --- Create the ShapeBounds object ---
     # The source_centroid is the pivot point for the final part placement.
     # It must map the new Polygon Centroid (Origin) back to the 3D Geometry.
     
