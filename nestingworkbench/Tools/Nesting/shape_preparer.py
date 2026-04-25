@@ -3,12 +3,11 @@ import FreeCAD
 import Part
 import copy
 import Draft
+import traceback
 from .algorithms import shape_processor
 from ...datatypes.shape_object import create_shape_object
 from ...datatypes.shape import Shape
 from ...freecad_helpers import get_up_direction_rotation
-
-
 
 class ShapePreparer:
     """
@@ -26,7 +25,7 @@ class ShapePreparer:
         Main entry point to prepare parts.
         
         Args:
-            ui_global_settings (dict): { 'spacing': float, 'deflection': float, 'simplification': float, 'rotation_steps': int, 'add_labels': bool, 'font_path': str }
+            ui_global_settings (dict): { 'spacing': float, 'deflection': float, 'simplification': float, 'rotation_steps': int, 'add_labels': bool, 'font_path': str, 'verbose': bool }
             quantities (dict): { label: (quantity, rotation_steps) }
             master_shapes_map (dict): { label: FreeCADObject }
             layout_obj (App::DocumentObjectGroup): The layout group.
@@ -38,15 +37,14 @@ class ShapePreparer:
         spacing = ui_global_settings['spacing']
         deflection = ui_global_settings.get('deflection', 0.05)
         simplification = ui_global_settings.get('simplification', 0.1)
+        verbose = ui_global_settings.get('verbose', False)
         
-        # --- Create or Retrieve the hidden MasterShapes group ---
         master_shapes_group = self._get_or_create_master_group(layout_obj)
 
         master_shape_obj_map = {} # Maps original FreeCAD object ID to the new master ShapeObject
         master_geometry_cache = {} # Maps original FreeCAD object ID to the processed Shape wrapper
         masters_to_place = []
 
-        # --- Step 1: Create the FreeCAD "master" objects for each unique part. ---
         for label, master_obj in master_shapes_map.items():
             try:
                 # Get up_direction for cache key
@@ -70,11 +68,11 @@ class ShapePreparer:
                 
                 if is_reloading:
                     master_shape_obj, temp_shape_wrapper = self._create_temp_from_reloading(
-                        master_obj, label, quantities, temp_shape_wrapper, spacing, deflection, simplification, cache_key, layout_obj, master_shapes_group
+                        master_obj, label, quantities, temp_shape_wrapper, spacing, deflection, simplification, cache_key, layout_obj, master_shapes_group, verbose=verbose
                     )
                 else:
                     master_shape_obj, temp_shape_wrapper = self._handle_new_master(
-                        master_obj, label, quantities, temp_shape_wrapper, spacing, deflection, simplification, cache_key, master_shapes_group, is_reloading
+                        master_obj, label, quantities, temp_shape_wrapper, spacing, deflection, simplification, cache_key, master_shapes_group, is_reloading, verbose=verbose
                     )
 
                 if master_shape_obj and temp_shape_wrapper:
@@ -86,13 +84,11 @@ class ShapePreparer:
                         masters_to_place.append((master_shape_obj.InList[0], temp_shape_wrapper))
 
             except Exception as e:
-                FreeCAD.Console.PrintError(f"Could not create boundary for '{master_obj.Label}', it will be skipped. Error: {e}\n")
+                FreeCAD.Console.PrintError(f"Could not create boundary for '{master_obj.Label}', it will be skipped. Error: {e}\n{traceback.format_exc()}\n")
                 continue
         
-        # --- Step 1.5: Sort masters and position them ---
         self._arrange_masters(masters_to_place, spacing)
 
-        # --- Step 2: Create in-memory Shape instances ---
         parts_to_nest = self._create_nesting_instances(
             master_shapes_map, 
             quantities, 
@@ -121,7 +117,7 @@ class ShapePreparer:
             master_shapes_group.ViewObject.Visibility = True
         return master_shapes_group
 
-    def _create_temp_from_reloading(self, master_obj, label, quantities, temp_shape_wrapper, spacing, deflection, simplification, cache_key, layout_obj, master_shapes_group):
+    def _create_temp_from_reloading(self, master_obj, label, quantities, temp_shape_wrapper, spacing, deflection, simplification, cache_key, layout_obj, master_shapes_group, verbose=False):
         """
         Creates a temporary copy of an existing master shape for use in the sandbox.
         """
@@ -135,7 +131,6 @@ class ShapePreparer:
                     original_container = parent
                     break
         
-        # 1. Create new temp container
         temp_container = self.doc.addObject("App::Part", f"temp_master_{original_label}")
         master_shapes_group.addObject(temp_container)
         
@@ -151,7 +146,6 @@ class ShapePreparer:
                  (bb.ZMin + bb.ZMax) / 2
             )
         
-        # 2. Create the shape object - copy geometry, center at origin with -source_centroid
         temp_master_obj = self.doc.addObject("Part::Feature", f"temp_shape_{original_label}")
         temp_master_obj.Label = f"master_shape_{original_label}"
         temp_master_obj.Shape = master_obj.Shape.copy()
@@ -160,7 +154,6 @@ class ShapePreparer:
         temp_master_obj.Placement = FreeCAD.Placement(source_centroid.negative(), FreeCAD.Rotation())
         temp_container.addObject(temp_master_obj)
         
-        # 3. Clone Boundary Object
         if hasattr(master_obj, "BoundaryObject") and master_obj.BoundaryObject:
             temp_bound = self.doc.addObject("Part::Feature", f"temp_boundary_{original_label}")
             temp_bound.Shape = master_obj.BoundaryObject.Shape.copy()
@@ -179,7 +172,6 @@ class ShapePreparer:
         if hasattr(temp_container, "ViewObject"): 
             temp_container.ViewObject.Visibility = True
 
-        # 4. Copy Quantity property
         part_params = quantities.get(original_label, {'quantity': 1})
         if isinstance(part_params, tuple):
             quantity = part_params[0]
@@ -187,7 +179,6 @@ class ShapePreparer:
             quantity = part_params.get('quantity', 1)
         temp_container.addProperty("App::PropertyInteger", "Quantity", "Nest", "Number of instances").Quantity = quantity
 
-        # 5. Build Shape wrapper using the stored SourceCentroid
         temp_shape_wrapper = None
         if hasattr(temp_master_obj, "BoundaryObject") and temp_master_obj.BoundaryObject:
             try:
@@ -219,13 +210,12 @@ class ShapePreparer:
                         
                         self.processed_shape_cache[cache_key] = copy.deepcopy(temp_shape_wrapper)
             except Exception as e:
-                FreeCAD.Console.PrintWarning(f"Shape reload failed for '{label}': {e}. Recalculating.\n")
+                FreeCAD.Console.PrintWarning(f"Shape reload failed for '{label}': {e}\n{traceback.format_exc()}. Recalculating.\n")
                 temp_shape_wrapper = None
         
-        # 6. Recalculate if reuse failed
         if not temp_shape_wrapper:
             temp_shape_wrapper = Shape(temp_master_obj)
-            shape_processor.create_single_nesting_part(temp_shape_wrapper, temp_master_obj, spacing, deflection, simplification)
+            shape_processor.create_single_nesting_part(temp_shape_wrapper, temp_master_obj, spacing, deflection, simplification, verbose=verbose)
             # Update the container's SourceCentroid with the recalculated value
             if temp_shape_wrapper.source_centroid:
                 temp_container.SourceCentroid = temp_shape_wrapper.source_centroid
@@ -233,162 +223,144 @@ class ShapePreparer:
 
         return temp_master_obj, temp_shape_wrapper
 
-    def _handle_new_master(self, master_obj, label, quantities, temp_shape_wrapper, spacing, deflection, simplification, cache_key, master_shapes_group, is_reloading):
-        # Get part parameters from quantities
-        part_params = quantities.get(label, {'quantity': 1, 'up_direction': 'Z+'})
-        if isinstance(part_params, tuple):
-            up_direction = 'Z+'
-        else:
-            up_direction = part_params.get('up_direction', 'Z+')
-        
+    def _handle_new_master(self, master_obj, label, quantities, temp_shape_wrapper, spacing, deflection, simplification, cache_key, master_shapes_group, is_reloading, verbose=False):
         if not temp_shape_wrapper:
+            # Get up_direction for initial processing
+            part_params = quantities.get(label, {'up_direction': 'Z+'})
+            up_direction = part_params[0] if isinstance(part_params, tuple) else part_params.get('up_direction', 'Z+')
+            
             temp_shape_wrapper = Shape(master_obj)
-            shape_processor.create_single_nesting_part(temp_shape_wrapper, master_obj, spacing, deflection, simplification, up_direction)
+            shape_processor.create_single_nesting_part(temp_shape_wrapper, master_obj, spacing, deflection, simplification, up_direction, verbose=verbose)
             self.processed_shape_cache[cache_key] = copy.deepcopy(temp_shape_wrapper)
 
-        master_container = self.doc.addObject("App::Part", f"master_{label}")
-        
-        # Get part parameters from quantities dict (now a dict of dicts)
-        part_params = quantities.get(label, {'quantity': 1, 'rotation_steps': 1, 'up_direction': 'Z+', 'fill_sheet': False})
-        if isinstance(part_params, tuple):
-            # Legacy format: (quantity, rotation_steps)
-            quantity = part_params[0]
-            up_direction = 'Z+'
-            fill_sheet = False
-        else:
-            quantity = part_params.get('quantity', 1)
-            up_direction = part_params.get('up_direction', 'Z+')
-            fill_sheet = part_params.get('fill_sheet', False)
-        
-        # Store properties
-        master_container.addProperty("App::PropertyInteger", "Quantity", "Nest", "Number of instances").Quantity = quantity
-        master_container.addProperty("App::PropertyString", "UpDirection", "Nest", "Up direction for 2D projection").UpDirection = up_direction
-        master_container.addProperty("App::PropertyBool", "FillSheet", "Nest", "Use to fill remaining space").FillSheet = fill_sheet
-
-        # *** CLEAN OFFSET DESIGN ***
-        # Store the source_centroid as a property on the container - this is THE source of truth
-        # for the offset between the Shapely polygon (centered at 0,0) and the FreeCAD geometry
-        master_container.addProperty("App::PropertyVector", "SourceCentroid", "Nesting", "Original geometry center")
         if temp_shape_wrapper.source_centroid is not None:
-            master_container.SourceCentroid = temp_shape_wrapper.source_centroid
+            source_centroid = temp_shape_wrapper.source_centroid
         else:
-            # Fallback: use the shape's bounding box center (safer than CenterOfMass for Compounds)
-            # Must match logic in shape_processor: transform effectively to world coords first
+            # Fallback: calculate from shape bounding box
             temp_shape = master_obj.Shape.copy()
             if master_obj.Placement and not master_obj.Placement.isIdentity():
                 temp_shape.transformShape(master_obj.Placement.Matrix)
-            
             bb = temp_shape.BoundBox
-            master_container.SourceCentroid = FreeCAD.Vector(
-                (bb.XMin + bb.XMax) / 2,
-                (bb.YMin + bb.YMax) / 2,
-                (bb.ZMin + bb.ZMax) / 2
-            )
+            source_centroid = FreeCAD.Vector((bb.XMin + bb.XMax) / 2, (bb.YMin + bb.YMax) / 2, (bb.ZMin + bb.ZMax) / 2)
 
-        # Make container visible during nesting (child boundary visibility is toggled by highlighting)
-        if hasattr(master_container, "ViewObject"):
-            master_container.ViewObject.Visibility = True
+        master_container, up_direction = self._create_master_container(label, quantities, source_centroid)
         
-        # DEBUG: Try using Part::Feature directly instead of custom object
         master_shape_obj = self.doc.addObject("Part::Feature", f"master_shape_{label}")
-        # Add required properties manually since we're not using ShapeObject
         if not hasattr(master_shape_obj, "ShowBounds"):
             master_shape_obj.addProperty("App::PropertyBool", "ShowBounds", "Display", "").ShowBounds = False
         if not hasattr(master_shape_obj, "BoundaryObject"):
             master_shape_obj.addProperty("App::PropertyLink", "BoundaryObject", "Nesting", "")
         
-        # Get shape geometry and center it at (0,0,0).
-        # This keeps Placement.Base at (0,0,0) which avoids App::Part container corruption.
         original_shape = master_obj.Shape.copy()
-        is_2d_object = master_obj.isDerivedFrom("Part::Part2DObject")
-        FreeCAD.Console.PrintMessage(f"  -> Creating master for '{label}' (type: {master_obj.TypeId}) with up_direction='{up_direction}'\n")
+        if verbose:
+            FreeCAD.Console.PrintMessage(f"  -> Creating master for '{label}' (type: {master_obj.TypeId}) with up_direction='{up_direction}'\n")
         
-        # Use source_centroid (which includes buffering offset) to match polygon centering.
-        if temp_shape_wrapper.source_centroid:
-            center_point = temp_shape_wrapper.source_centroid
-        else:
-            actual_bb = original_shape.BoundBox
-            center_point = FreeCAD.Vector(
-                (actual_bb.XMin + actual_bb.XMax) / 2,
-                (actual_bb.YMin + actual_bb.YMax) / 2,
-                (actual_bb.ZMin + actual_bb.ZMax) / 2
-            )
-        
-        if is_2d_object:
-            # For Draft/2D objects, rebuild shape by transforming each edge's curve parameters.
-            # OCCT parametric curves (Geom_Circle) don't transform via transformGeometry,
-            # so we reconstruct them at the correct position preserving smooth curves.
+        if master_obj.isDerivedFrom("Part::Part2DObject"):
             plc = master_obj.Placement
-            offset = FreeCAD.Vector(center_point.x, center_point.y, center_point.z)
-            try:
-                new_edges = []
-                for edge in original_shape.Edges:
-                    curve = edge.Curve
-                    if hasattr(curve, 'Radius') and hasattr(curve, 'Center'):
-                        # Circle or Arc: transform center, preserve radius and smoothness
-                        world_center = plc.multVec(curve.Center)
-                        new_center = world_center - offset
-                        new_axis = plc.Rotation.multVec(curve.Axis)
-                        if edge.isClosed():
-                            new_edges.append(Part.makeCircle(curve.Radius, new_center, new_axis))
-                        else:
-                            c = Part.Circle(new_center, new_axis, curve.Radius)
-                            new_edges.append(c.toShape(edge.FirstParameter, edge.LastParameter))
-                    elif len(edge.Vertexes) >= 2:
-                        # Line: transform endpoints
-                        p1 = plc.multVec(edge.Vertexes[0].Point) - offset
-                        p2 = plc.multVec(edge.Vertexes[1].Point) - offset
-                        new_edges.append(Part.makeLine(p1, p2))
-                    else:
-                        # Fallback: discretize unknown curve types
-                        pts = edge.discretize(Number=72)
-                        transformed = [plc.multVec(p) - offset for p in pts]
-                        for i in range(len(transformed) - 1):
-                            new_edges.append(Part.makeLine(transformed[i], transformed[i + 1]))
-                
-                if new_edges:
-                    wire = Part.Wire(new_edges)
-                    try:
-                        original_shape = Part.Face(wire)
-                    except Exception:
-                        original_shape = Part.Compound([wire])
-                    FreeCAD.Console.PrintMessage(f"     Rebuilt 2D shape with smooth curves\n")
-            except Exception as e:
-                FreeCAD.Console.PrintWarning(f"     Curve preservation unsuccessful for '{label}': {e}. Using polygon approximation.\n")
-                # Fallback: discretize to polygon
-                new_wires = []
-                for wire in master_obj.Shape.Wires:
-                    pts = wire.discretize(Number=72)
-                    if len(pts) > 2:
-                        transformed = [plc.multVec(p) - offset for p in pts]
-                        if transformed[0] != transformed[-1]:
-                            transformed.append(transformed[0])
-                        new_wires.append(Part.makePolygon(transformed))
-                if new_wires:
-                    try:
-                        original_shape = Part.Face(new_wires[0])
-                    except Exception:
-                        original_shape = Part.Compound(new_wires)
+            offset = FreeCAD.Vector(source_centroid.x, source_centroid.y, source_centroid.z)
+            original_shape = self._rebuild_2d_shape(master_obj, original_shape, source_centroid, plc, offset, verbose, label)
         else:
-            # Regular Part objects: use combined transformGeometry (Placement + centering)
-            combined_mat = FreeCAD.Matrix()
-            combined_mat.move(center_point.negative())
-            if master_obj.Placement and not master_obj.Placement.isIdentity():
-                combined_mat = combined_mat.multiply(master_obj.Placement.Matrix)
-            original_shape = original_shape.transformGeometry(combined_mat)
+            original_shape = self._center_3d_shape(master_obj, original_shape, source_centroid)
         
         master_shape_obj.Shape = original_shape
-        
-        FreeCAD.Console.PrintMessage(f"     Centered from ({center_point.x:.2f}, {center_point.y:.2f}) to origin\n")
-        
-        # Get up_direction rotation (Placement has NO translation — only rotation)
-        up_rotation = get_up_direction_rotation(up_direction)
-        master_shape_obj.Placement = FreeCAD.Placement(FreeCAD.Vector(0, 0, 0), up_rotation)
+        master_shape_obj.Placement = FreeCAD.Placement(FreeCAD.Vector(0, 0, 0), get_up_direction_rotation(up_direction))
         
         if hasattr(master_shape_obj, "ViewObject"):
             master_shape_obj.ViewObject.Visibility = True
         master_container.addObject(master_shape_obj)
 
+        self._create_boundary_object(master_container, master_shape_obj, temp_shape_wrapper, verbose)
+        master_shapes_group.addObject(master_container)
+        
+        return master_shape_obj, temp_shape_wrapper
+
+    def _create_master_container(self, label, quantities, source_centroid):
+        """Creates the App::Part container and populates it with metadata properties."""
+        master_container = self.doc.addObject("App::Part", f"master_{label}")
+        
+        part_params = quantities.get(label, {'quantity': 1, 'up_direction': 'Z+', 'fill_sheet': False})
+        if isinstance(part_params, tuple):
+            quantity, up_direction, fill_sheet = part_params[0], 'Z+', False
+        else:
+            quantity = part_params.get('quantity', 1)
+            up_direction = part_params.get('up_direction', 'Z+')
+            fill_sheet = part_params.get('fill_sheet', False)
+        
+        master_container.addProperty("App::PropertyInteger", "Quantity", "Nest", "Number of instances").Quantity = quantity
+        master_container.addProperty("App::PropertyString", "UpDirection", "Nest", "Up direction for 2D projection").UpDirection = up_direction
+        master_container.addProperty("App::PropertyBool", "FillSheet", "Nest", "Use to fill remaining space").FillSheet = fill_sheet
+        master_container.addProperty("App::PropertyVector", "SourceCentroid", "Nesting", "Original geometry center").SourceCentroid = source_centroid
+
+        if hasattr(master_container, "ViewObject"):
+            master_container.ViewObject.Visibility = True
+            
+        return master_container, up_direction
+
+    def _rebuild_2d_shape(self, master_obj, original_shape, center_point, plc, offset, verbose, label):
+        """Rebuilds 2D shape by transforming each edge's curve parameters to preserve smooth curves."""
+        try:
+            new_edges = []
+            for edge in original_shape.Edges:
+                curve = edge.Curve
+                if hasattr(curve, 'Radius') and hasattr(curve, 'Center'):
+                    # Circle or Arc: transform center, preserve radius and smoothness
+                    world_center = plc.multVec(curve.Center)
+                    new_center = world_center - offset
+                    new_axis = plc.Rotation.multVec(curve.Axis)
+                    if edge.isClosed():
+                        new_edges.append(Part.makeCircle(curve.Radius, new_center, new_axis))
+                    else:
+                        c = Part.Circle(new_center, new_axis, curve.Radius)
+                        new_edges.append(c.toShape(edge.FirstParameter, edge.LastParameter))
+                elif len(edge.Vertexes) >= 2:
+                    # Line: transform endpoints
+                    p1 = plc.multVec(edge.Vertexes[0].Point) - offset
+                    p2 = plc.multVec(edge.Vertexes[1].Point) - offset
+                    new_edges.append(Part.makeLine(p1, p2))
+                else:
+                    # Fallback: discretize unknown curve types
+                    pts = edge.discretize(Number=72)
+                    transformed = [plc.multVec(p) - offset for p in pts]
+                    for i in range(len(transformed) - 1):
+                        new_edges.append(Part.makeLine(transformed[i], transformed[i + 1]))
+            
+            if new_edges:
+                wire = Part.Wire(new_edges)
+                try:
+                    rebuilt_shape = Part.Face(wire)
+                except Exception:
+                    rebuilt_shape = Part.Compound([wire])
+                if verbose:
+                    FreeCAD.Console.PrintMessage(f"     Rebuilt 2D shape with smooth curves\n")
+                return rebuilt_shape
+        except Exception as e:
+            FreeCAD.Console.PrintWarning(f"     Curve preservation unsuccessful for '{label}': {e}. Using polygon approximation.\n")
+            # Fallback: discretize to polygon
+            new_wires = []
+            for wire in master_obj.Shape.Wires:
+                pts = wire.discretize(Number=72)
+                if len(pts) > 2:
+                    transformed = [plc.multVec(p) - offset for p in pts]
+                    if transformed[0] != transformed[-1]:
+                        transformed.append(transformed[0])
+                    new_wires.append(Part.makePolygon(transformed))
+            if new_wires:
+                try:
+                    return Part.Face(new_wires[0])
+                except Exception:
+                    return Part.Compound(new_wires)
+        return original_shape
+
+    def _center_3d_shape(self, master_obj, original_shape, center_point):
+        """Centers regular Part objects using combined transformGeometry (Placement + centering)."""
+        combined_mat = FreeCAD.Matrix()
+        combined_mat.move(center_point.negative())
+        if master_obj.Placement and not master_obj.Placement.isIdentity():
+            combined_mat = combined_mat.multiply(master_obj.Placement.Matrix)
+        return original_shape.transformGeometry(combined_mat)
+
+    def _create_boundary_object(self, master_container, master_shape_obj, temp_shape_wrapper, verbose):
+        """Creates the boundary shape object from the temp_shape_wrapper and adds it to the master_container."""
         if temp_shape_wrapper.polygon:
             boundary_obj = temp_shape_wrapper.draw_bounds(self.doc, FreeCAD.Vector(0,0,0), None)
             if boundary_obj:
@@ -397,11 +369,10 @@ class ShapePreparer:
                 boundary_obj.Placement = FreeCAD.Placement()
                 master_shape_obj.BoundaryObject = boundary_obj
                 master_shape_obj.ShowBounds = False
-                if hasattr(boundary_obj, "ViewObject"): boundary_obj.ViewObject.Visibility = False
-                FreeCAD.Console.PrintMessage(f"     Bounds centroid from polygon: {temp_shape_wrapper.polygon.centroid}\n")
-        
-        master_shapes_group.addObject(master_container)
-        return master_shape_obj, temp_shape_wrapper
+                if hasattr(boundary_obj, "ViewObject"): 
+                    boundary_obj.ViewObject.Visibility = False
+                if verbose:
+                    FreeCAD.Console.PrintMessage(f"     Bounds centroid from polygon: {temp_shape_wrapper.polygon.centroid}\n")
 
     def _arrange_masters(self, masters_to_place, spacing):
         masters_to_place.sort(key=lambda item: item[1].area, reverse=True)
@@ -446,6 +417,7 @@ class ShapePreparer:
         spacing = ui_settings['spacing']
         # Default global rotation
         global_rotation_steps = ui_settings['rotation_steps']
+        verbose = ui_settings.get('verbose', False)
 
         for label, original_obj in master_shapes_map.items():
             # If reloading, label is master_shape_X, handle mapping
@@ -495,7 +467,7 @@ class ShapePreparer:
                 part_copy.Placement = master_shape_obj.Placement
                 
                 # Debug: Check what geometry we're getting
-                if up_direction != "Z+" and up_direction is not None:
+                if verbose and up_direction != "Z+" and up_direction is not None:
                     FreeCAD.Console.PrintMessage(f"     Part copy {shape_instance.id}: BoundBox={part_copy.Shape.BoundBox}\n")
                 
                 # Copy boundary if exists

@@ -6,6 +6,7 @@ import copy
 from datetime import datetime
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import numpy as np
 from shapely.geometry import Polygon, Point
 
 from shapely.prepared import prep
@@ -27,6 +28,7 @@ class PlacementOptimizer:
         self.search_direction = search_direction
         self.log_callback = log_callback
         self.trial_callback = trial_callback  # Called for each trial placement in simulation mode
+        self.verbose = False
 
     def log(self, message):
         if self.log_callback:
@@ -58,25 +60,71 @@ class PlacementOptimizer:
             part_rotation_steps = self.rotation_steps
         part_rotation_steps = max(1, part_rotation_steps)
         
-        # Parallel execution
-        with ThreadPoolExecutor() as executor:
+        # Batch evaluate or parallel evaluate
+        if self.engine.use_gpu:
+            import time as _time
+            all_rotation_candidates = []
             angles = [i * (360.0 / part_rotation_steps) for i in range(part_rotation_steps)]
-            futures = {
-                executor.submit(self._evaluate_rotation, angle, part, placed_parts_grouped, sheet, direction): angle 
-                for angle in angles
-            }
-            
-            for future in as_completed(futures):
-                try:
-                    res = future.result()
-                    if res and res['metric'] < best_result['metric']:
-                        best_result = res
-                        # Call trial callback from main thread for each better result found
-                        if self.trial_callback and best_result.get('x') is not None:
-                            self.trial_callback(part, best_result['angle'], best_result['x'], best_result['y'])
-                except Exception as e:
-                    self.log(f"Error in rotation evaluation thread: {e}")
+
+            t0_nfp = _time.perf_counter()
+            for angle in angles:
+                nfp_entry = self.engine.get_global_nfp_for(part, angle, sheet)
+                if nfp_entry is None:
+                    continue
+                candidates = self._get_candidates_for_rotation(angle, part, sheet, nfp_entry=nfp_entry)
+                if len(candidates):
+                    all_rotation_candidates.append((angle, candidates, nfp_entry))
+            dt_nfp = (_time.perf_counter() - t0_nfp) * 1000
+            self.log(f"[PERF] find_best_placement '{getattr(part, 'id', '?')}': "
+                     f"nfp_assembly={dt_nfp:.0f}ms "
+                     f"(placed={len(sheet.parts)} angles={len(angles)})")
+
+            res = self.engine.score_candidates_gpu(part, all_rotation_candidates)
+            if res and res.get('metric', float('inf')) < best_result['metric']:
+                best_result = res
+                # BUG-003: Restore visual feedback for GPU path
+                if self.trial_callback and best_result.get('x') is not None:
+                     self.trial_callback(part, best_result['angle'], best_result['x'], best_result['y'])
+        else:
+            # CPU Parallel evaluation
+            import time as _time
+            t0_parallel = _time.perf_counter()
+            total_nfp_ms = 0.0
+            total_score_ms = 0.0
+            with ThreadPoolExecutor() as executor:
+                angles = [i * (360.0 / part_rotation_steps) for i in range(part_rotation_steps)]
+                futures = {
+                    executor.submit(self._evaluate_rotation, angle, part, placed_parts_grouped, sheet, direction): angle
+                    for angle in angles
+                }
+
+                for future in as_completed(futures):
+                    try:
+                        res = future.result()
+                        if res:
+                            total_nfp_ms += res.get('_t_nfp_ms', 0)
+                            total_score_ms += res.get('_t_score_ms', 0)
+                            if res['metric'] < best_result['metric']:
+                                best_result = res
+                                # Call trial callback from main thread for each better result found
+                                if self.trial_callback and best_result.get('x') is not None:
+                                    self.trial_callback(part, best_result['angle'], best_result['x'], best_result['y'])
+                    except Exception as e:
+                        self.log(f"Error in rotation evaluation thread: {e}")
+
+            dt_parallel = (_time.perf_counter() - t0_parallel) * 1000
+            self.log(f"[TIMING] '{getattr(part, 'id', '?')}': wall={dt_parallel:.0f}ms "
+                     f"nfp={total_nfp_ms:.0f}ms score={total_score_ms:.0f}ms "
+                     f"({len(angles)} rotations, {len(sheet.parts)} placed)")
+            if self.verbose:
+                self.log(f"  -> Parallel eval: {len(angles)} rotations in {dt_parallel:.1f}ms "
+                         f"(ideal speedup: {len(angles)}x, pool workers: {min(len(angles), os.cpu_count() or 1)})")
+            best_result['_t_nfp_ms'] = total_nfp_ms
+            best_result['_t_score_ms'] = total_score_ms
         
+        if self.verbose:
+            self.log(f"  -> Best result for {part.id}: {best_result}")
+
         if best_result.get('x') is not None:
              part.set_rotation(best_result['angle'], reposition=False)
              curr = part.centroid
@@ -85,89 +133,101 @@ class PlacementOptimizer:
         return None
 
     def _evaluate_rotation(self, angle, part, placed_parts_grouped, sheet, direction):
-        # 1. Get Combined NFP from Engine (Incrementally Cached on Sheet)
+        import time as _time, threading
+        t0 = _time.perf_counter()
+        thread_id = threading.current_thread().name
+        
         nfp_entry = self.engine.get_global_nfp_for(part, angle, sheet)
+        t_nfp = _time.perf_counter()
         
         # Check for NFP calculation failure
         if nfp_entry is None:
             return {'metric': float('inf')}
         
         bin_polygon = self.engine.bin_polygon
-        
+
         # Prepare geometry for fast containment check
         union_poly = nfp_entry['polygon']
-        prepared_nfp = nfp_entry.get('prepared')
-        if not prepared_nfp and not union_poly.is_empty:
-             prepared_nfp = prep(union_poly)
-             with sheet.nfp_cache_lock:
-                 # Double-check: another thread may have set it
-                 if not nfp_entry.get('prepared'):
-                     nfp_entry['prepared'] = prepared_nfp
-                 else:
-                     prepared_nfp = nfp_entry['prepared']
+        prepared_nfp = prep(union_poly) if not union_poly.is_empty else None
 
-        # 2. Generate Candidates
+        ext_cands = self._get_candidates_for_rotation(angle, part, sheet, nfp_entry=nfp_entry)
+        if not len(ext_cands):
+            return {'metric': float('inf')}
+
         rotated_poly = rotate(part.original_polygon, angle, origin='centroid')
         if not rotated_poly: return {'metric': float('inf')}
 
-        # A. Bin Candidates (Corners of part vs Corners of bin)
-        min_x, min_y, max_x, max_y = rotated_poly.bounds
-        ext_cands = []
-        w_bin, h_bin = self.engine.bin_width, self.engine.bin_height
-        
-        # Essential placement points
-        # Bottom-Left at (0,0) -> (-min_x, -min_y)
-        ext_cands.append(Point(-min_x, -min_y)) 
-        ext_cands.append(Point(w_bin - max_x, -min_y))
-        ext_cands.append(Point(-min_x, h_bin - max_y))
-        ext_cands.append(Point(w_bin - max_x, h_bin - max_y))
-
-        # B. NFP Boundary Candidates
-        # Filter points that are within bin bounds
-        valid_points = []
-        for p in nfp_entry['points']:
-             if 0 <= p.x <= w_bin and 0 <= p.y <= h_bin:
-                 valid_points.append(p)
-        ext_cands.extend(valid_points)
-
-        # 3. Score Candidates
-        centroid = rotated_poly.centroid
-        dir_x, dir_y = direction
-        
         best = {'metric': float('inf')}
-        valid_count = 0
         rejected_nfp = 0
         rejected_bounds = 0
+
+        centroid = rotated_poly.centroid
+
+        valid_rows = []
+        for row in ext_cands:
+            x, y = float(row[0]), float(row[1])
+            if prepared_nfp and prepared_nfp.contains(Point(x, y)):
+                rejected_nfp += 1
+                continue
+            dx, dy = x - centroid.x, y - centroid.y
+            if not bin_polygon.contains(translate(rotated_poly, xoff=dx, yoff=dy)):
+                rejected_bounds += 1
+                continue
+            valid_rows.append((x, y))
+
+        if valid_rows:
+            pts_arr = np.array(valid_rows, dtype=np.float64)
+            valid_mask = np.ones(len(valid_rows), dtype=bool)
+            best_idx, metric = MinkowskiEngine.score_gravity(pts_arr, valid_mask, direction)
+            if best_idx is not None:
+                best = {'x': pts_arr[best_idx, 0], 'y': pts_arr[best_idx, 1],
+                        'angle': angle, 'metric': metric}
         
-        def score_point(pt):
-             nonlocal rejected_nfp, rejected_bounds
-             # A. Check NFP Collision (Fastest if cached)
-             if prepared_nfp and prepared_nfp.contains(pt): 
-                 rejected_nfp += 1
-                 return None
-                 
-             dx, dy = pt.x - centroid.x, pt.y - centroid.y
-             
-             # B. Check Bounds
-             test_poly = translate(rotated_poly, xoff=dx, yoff=dy)
-             if not bin_polygon.contains(test_poly):
-                 rejected_bounds += 1
-                 return None
+        # Notify better result found
+        if self.trial_callback and best.get('x') is not None:
+             self.trial_callback(part, angle, best['x'], best['y'])
 
-             return pt.x * (-dir_x) + pt.y * (-dir_y)
+        t_end = _time.perf_counter()
+        if self.verbose:
+            self.log(f"    [{thread_id}] angle={angle:.0f}: NFP={((t_nfp-t0)*1000):.1f}ms, "
+                     f"score={((t_end-t_nfp)*1000):.1f}ms, total={((t_end-t0)*1000):.1f}ms")
 
-        # Sort candidates (heuristic optimization)
-        # ext_cands.sort(key=lambda p: p.x * (-dir_x) + p.y * (-dir_y))
-
-        for pt in ext_cands:
-            valid_metric = score_point(pt)
-            if valid_metric is not None:
-                valid_count += 1
-                if valid_metric < best['metric']:
-                    best = {'x': pt.x, 'y': pt.y, 'angle': angle, 'metric': valid_metric}
-        
+        best['_t_nfp_ms'] = (t_nfp - t0) * 1000
+        best['_t_score_ms'] = (t_end - t_nfp) * 1000
         return best
 
+    def _get_candidates_for_rotation(self, angle, part, sheet, nfp_entry=None):
+        """Helper to compute candidate points for a specific rotation.
+
+        Pass a pre-computed nfp_entry to avoid a redundant get_global_nfp_for call.
+        Returns (N, 2) float32 numpy array.
+        """
+        if nfp_entry is None:
+            nfp_entry = self.engine.get_global_nfp_for(part, angle, sheet)
+        if nfp_entry is None:
+            return np.empty((0, 2), dtype=np.float32)
+
+        rotated_poly = rotate(part.original_polygon, angle, origin='centroid')
+        if not rotated_poly:
+            return np.empty((0, 2), dtype=np.float32)
+
+        min_x, min_y, max_x, max_y = rotated_poly.bounds
+        w_bin, h_bin = self.engine.bin_width, self.engine.bin_height
+
+        corners = np.array([
+            [-min_x,        -min_y       ],
+            [w_bin - max_x, -min_y       ],
+            [-min_x,        h_bin - max_y],
+            [w_bin - max_x, h_bin - max_y],
+        ], dtype=np.float32)
+
+        nfp_pts = nfp_entry['points']  # (N, 2) float32
+        if len(nfp_pts):
+            mask = ((nfp_pts[:, 0] >= 0) & (nfp_pts[:, 0] <= w_bin) &
+                    (nfp_pts[:, 1] >= 0) & (nfp_pts[:, 1] <= h_bin))
+            filtered = nfp_pts[mask]
+            return np.vstack([corners, filtered]) if len(filtered) else corners
+        return corners
 
 class Nester:
     """
@@ -188,15 +248,19 @@ class Nester:
         
         # Logging control
         self.quiet = kwargs.get("quiet", False)  # If True, suppress per-part logs
+        self.verbose = kwargs.get("verbose", False)  # If True, enable extra detailed logs
         self.log_callback = kwargs.get("log_callback")
         self.trial_callback = kwargs.get("trial_callback")  # For visualizing trial placements
         self.part_start_callback = kwargs.get("part_start_callback")  # Called when starting to place a part
         self.part_end_callback = kwargs.get("part_end_callback")  # Called after part is placed
         self.progress_callback = kwargs.get("progress_callback") # Called with (current, total)
+        self.cancel_callback = kwargs.get("cancel_callback") # Called to check if nesting should abort
         
         step_size = kwargs.get("step_size", 5.0) 
-        self.engine = MinkowskiEngine(width, height, step_size, log_callback=self.log_callback)
+        use_gpu = kwargs.get("use_gpu", False)
+        self.engine = MinkowskiEngine(width, height, step_size, log_callback=self.log_callback, use_gpu=use_gpu, verbose=self.verbose, search_direction=self.search_direction)
         self.optimizer = PlacementOptimizer(self.engine, rotation_steps, self.search_direction, self.log_callback, self.trial_callback)
+        self.optimizer.verbose = self.verbose
 
         self.parts_to_place = []
         self.sheets = []
@@ -218,15 +282,21 @@ class Nester:
     def nest(self, parts, sort=True):
         """
         Main entry point for nesting.
-        
+
         NOTE: GA optimization is now handled at the controller level using LayoutManager.
         This method just runs standard greedy nesting.
         """
-        # Cleanup debug objects
-        doc = FreeCAD.ActiveDocument
-        if doc and doc.getObject("MinkowskiDebug"):
-            doc.removeObject("MinkowskiDebug")
-            doc.recompute()
+        # Cleanup debug objects — only safe from the main thread
+        try:
+            from PySide.QtCore import QThread, QCoreApplication
+            app = QCoreApplication.instance()
+            if app and QThread.currentThread() == app.thread():
+                doc = FreeCAD.ActiveDocument
+                if doc and doc.getObject("MinkowskiDebug"):
+                    doc.removeObject("MinkowskiDebug")
+                    doc.recompute()
+        except Exception:
+            pass
 
         return self._nest_standard(parts, sort=sort)
 
@@ -245,62 +315,94 @@ class Nester:
         current_parts = list(parts)
         if sort:
             current_parts.sort(key=lambda p: p.area, reverse=True)
-            
+
         sheets = []
         unplaced_parts = []
         total_parts = len(current_parts)
-        
+        _part_timings = []  # (part_id, elapsed_s, placed)
+        self.engine.reset_perf_stats()
+
         for i, part in enumerate(current_parts):
-            if not quiet:
+            if self.cancel_callback and self.cancel_callback():
+                self.log("Nesting cancelled by user.")
+                break
+
+            if self.verbose and not quiet:
                 self.log(f"Processing part {i+1}/{total_parts}: {part.id}")
-                if self.progress_callback:
-                    self.progress_callback(i + 1, total_parts, f"Placing {part.id}...")
+            
+            if not quiet and self.progress_callback:
+                self.progress_callback(i + 1, total_parts, f"Placing {part.id}...")
+            
+            import time as _time
+            _t0_part = _time.perf_counter()
             start_part_time = datetime.now()
             placed = False
-            
+
             # Notify start of part placement (for highlighting master shapes)
             if not quiet and self.part_start_callback:
                 self.part_start_callback(part)
-            
-            # 1. Try existing sheets
+
             for sheet_idx, sheet in enumerate(sheets):
                 if (sheet.width * sheet.height - sheet.used_area) < part.area: continue
 
                 if self._attempt_placement_on_sheet(part, sheet):
                     placed = True
-                    if not quiet:
+                    if self.verbose and not quiet:
                         elapsed = (datetime.now() - start_part_time).total_seconds()
                         self.log(f"  -> Placed on Sheet {sheet_idx+1} ({elapsed:.4f}s)")
-                        if self.update_callback: self.update_callback(part, sheet)
+
+                    if not quiet and self.update_callback:
+                        self.update_callback(part, sheet)
                     break
-            
-            # 2. Try new sheet
+
             if not placed:
                 new_sheet = Sheet(len(sheets), self.bin_width, self.bin_height, spacing=self.spacing)
                 if self._attempt_placement_on_sheet(part, new_sheet):
                     sheets.append(new_sheet)
                     placed = True
-                    if not quiet:
+                    if self.verbose and not quiet:
                         elapsed = (datetime.now() - start_part_time).total_seconds()
                         self.log(f"  -> Placed on New Sheet {len(sheets)} ({elapsed:.4f}s)")
-                        if self.update_callback: self.update_callback(part, new_sheet)
+
+                    if not quiet and self.update_callback:
+                        self.update_callback(part, new_sheet)
                 else:
                     unplaced_parts.append(part)
                     if not quiet:
                         self.log(f"  -> FAILED to place in {(datetime.now() - start_part_time).total_seconds():.4f}s")
-            
+
+            _part_timings.append((part.id, _time.perf_counter() - _t0_part, placed))
+
             # Notify end of part placement (for unhighlighting master shapes)
             if not quiet and self.part_end_callback:
                 self.part_end_callback(part, placed)
-            
-            # Submit background NFP pre-computation for remaining parts
+
             if placed and i < total_parts - 1:
                 self._submit_precomputation(sheets, current_parts[i+1:])
-        
+
         # Shut down precompute pool (don't wait for pending futures)
         self._precompute_pool.shutdown(wait=False)
         self._precomputed_keys.clear()
+
+        if not quiet and _part_timings:
+            self._log_timing_summary(_part_timings)
+
         return sheets, unplaced_parts
+
+    def _log_timing_summary(self, part_timings):
+        total_s = sum(t for _, t, _ in part_timings)
+        cache = self.engine.get_perf_stats()
+        total_lookups = cache['cache_hits'] + cache['cache_misses']
+        hit_pct = cache['cache_hits'] / total_lookups * 100 if total_lookups else 0
+        self.log(
+            f"[TIMING] {len(part_timings)} parts in {total_s:.2f}s | "
+            f"NFP cache: {cache['cache_hits']} hits ({hit_pct:.0f}%) / "
+            f"{cache['cache_misses']} misses, compute={cache['nfp_compute_ms']:.0f}ms"
+        )
+        slowest = sorted(part_timings, key=lambda x: -x[1])[:5]
+        self.log("[TIMING] Slowest: " + ", ".join(
+            f"{pid}={t:.2f}s{'(unplaced)' if not ok else ''}" for pid, t, ok in slowest
+        ))
 
     def _attempt_placement_on_sheet(self, part, sheet):
         """Delegates to PlacementOptimizer."""
@@ -365,8 +467,8 @@ class Nester:
                         if cache_key in Shape.nfp_cache:
                             continue
                     
-                    # Fire-and-forget: compute in background, result goes to cache
+                    nfp_fn = self.engine._calculate_and_cache_nfp
                     self._precompute_pool.submit(
-                        self.engine._calculate_and_cache_nfp,
+                        nfp_fn,
                         placed.shape, 0.0, remaining, relative_angle, cache_key
                     )

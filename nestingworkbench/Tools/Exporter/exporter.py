@@ -23,8 +23,6 @@ class SheetExporter:
         else:
             self.layout_group = get_layout_group(self.doc)
 
-
-
     def export_sheets(self, export_dir, delete_generated_objects=True):
         """Main method to create 2D projections of the layout in a new folder."""
         if not self.layout_group:
@@ -107,5 +105,4 @@ class SheetExporter:
         if delete_generated_objects:
             recursive_delete(self.doc, views_folder)
             FreeCAD.Console.PrintMessage("Deleted temporary 2D views folder.\n")
-
 

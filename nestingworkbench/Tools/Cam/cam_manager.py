@@ -6,6 +6,7 @@ and managing CAM jobs from the nested layouts.
 """
 
 import FreeCAD
+from ...constants import *
 
 class CAMManager:
     """Manages the creation of FreeCAD CAM jobs from nested layouts."""
@@ -32,7 +33,6 @@ class CAMManager:
             if obj.isDerivedFrom("App::DocumentObjectGroup") and obj.Label.startswith("Sheet_"):
                 self._create_job_for_sheet(obj, include_parts, include_labels, include_outlines, template_path)
 
-
     def _create_job_for_sheet(self, sheet_group, include_parts=True, include_labels=True, include_outlines=False, template_path=None):
         """Creates a CAM job for a sheet with proper stock dimensions.
         
@@ -45,7 +45,6 @@ class CAMManager:
         """
         # Import CAM modules (FreeCAD 1.1+)
         try:
-            from CAM.Path.Main import Job as PathJob
             from CAM.Path.Main import Stock as PathStock
         except ImportError as e:
             FreeCAD.Console.PrintError(f"Failed to import CAM modules. Error: {e}\\n")
@@ -59,15 +58,15 @@ class CAMManager:
         
         # Try to read from layout group properties first (most reliable)
         if self.layout_group:
-            if hasattr(self.layout_group, 'SheetWidth'):
+            if hasattr(self.layout_group, PROP_SHEET_WIDTH):
                 sheet_width = float(self.layout_group.SheetWidth)
-            if hasattr(self.layout_group, 'SheetHeight'):
+            if hasattr(self.layout_group, PROP_SHEET_HEIGHT):
                 sheet_height = float(self.layout_group.SheetHeight)
-            if hasattr(self.layout_group, 'SheetThickness'):
+            if hasattr(self.layout_group, PROP_SHEET_THICKNESS):
                 sheet_thickness = float(self.layout_group.SheetThickness)
             
             # Fallback to spreadsheet if properties don't exist
-            if not hasattr(self.layout_group, 'SheetWidth'):
+            if not hasattr(self.layout_group, PROP_SHEET_WIDTH):
                 spreadsheet = self.layout_group.getObject("LayoutParameters")
                 if spreadsheet:
                     try:
@@ -254,11 +253,6 @@ class CAMManager:
                 except Exception as e:
                     FreeCAD.Console.PrintWarning(f"Could not group CAM geometry: {e}\\n")
 
-                # Recompute to finalize the job
-                self.doc.recompute()
-                
-                FreeCAD.Console.PrintMessage(f"Created CAM job '{job.Label}' for {sheet_group.Label} (stock: {sheet_width}x{sheet_height}x{sheet_thickness}mm)\\n")
-                
                 # Recompute to finalize the job
                 self.doc.recompute()
                 

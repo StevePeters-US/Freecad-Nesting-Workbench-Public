@@ -10,6 +10,7 @@ import copy
 import FreeCAD
 import threading
 from ..freecad_helpers import get_up_direction_rotation
+from ..Tools.Nesting import placement_utils
 
 try:
     from shapely.affinity import translate, rotate
@@ -18,10 +19,18 @@ except ImportError:
     SHAPELY_AVAILABLE = False
 
 class Shape:
-    """
-    Represents a single part for nesting. This class holds the source object,
-    its geometric boundary (as a shapely Polygon), and its placement state
-    during and after the nesting process.
+    """Represents a single part for nesting.
+
+    This class holds the source object, its geometric boundary (as a shapely
+    Polygon), and its placement state during and after the nesting process.
+
+    Attributes:
+        polygon (Polygon): The current, transformed polygon used for nesting gap
+            calculations and collision checks.
+        original_polygon (Polygon): The true polygon boundary before buffering.
+            Used as a base for rotation operations.
+        unbuffered_polygon (Polygon): The un-rotated, un-buffered polygon for
+            area calculation and visualization.
     """
     nfp_cache = {}
     nfp_cache_lock = threading.Lock()
@@ -44,14 +53,12 @@ class Shape:
         self.instance_num = 1 # Default, will be overridden on copies
         self.id = f"{source_freecad_object.Label}_{self.instance_num}"
         
-        # --- Geometric properties (merged from ShapeBounds) ---
         self._angle = 0
         self.polygon = None # The current, transformed polygon for collision checks
         self.original_polygon = None # The un-rotated buffered polygon, used as a base for rotation
         self.unbuffered_polygon = None # The un-rotated, un-buffered polygon for area calculation
         self.source_centroid = None # The original pivot point from the FreeCAD geometry
 
-        # --- Metadata ---
         self.label_text = None # Will hold the text for the Draft.ShapeString object
         self.rotation_steps = 1 # The definitive number of rotation steps for this part.
         self.spacing = 0 # The spacing used for the nesting operation.
@@ -60,7 +67,6 @@ class Shape:
         self.up_direction = "Z+" # The up direction for 2D projection
         self.fill_sheet = False # If True, use to fill remaining space
         
-        # --- State during/after nesting ---
         self.fc_object = None # Link to the physical FreeCAD object in the 'PartsToPlace' group
         self.placement = None # This will be populated with the final FreeCAD.Placement after nesting.
 
@@ -160,12 +166,8 @@ class Shape:
         if sheet_origin is None:
             sheet_origin = FreeCAD.Vector(0, 0, 0)
 
-        # Where the nested polygon's center ended up
-        nested_centroid_shapely = self.polygon.centroid
-        nested_centroid = FreeCAD.Vector(nested_centroid_shapely.x, nested_centroid_shapely.y, 0)
-        
-        # Container position = target world position for the shape's center
-        container_pos = sheet_origin + nested_centroid
+        # Use utility to calculate world position for the container
+        container_pos = placement_utils.calculate_container_centroid(self.polygon, sheet_origin)
         
         # Only in-plane Z rotation for the container (keeps bounds flat)
         angle_deg = self._angle

@@ -1,19 +1,33 @@
+"""Computes No-Fit Polygons (NFP) and Inner-Fit Polygons (IFP) using Minkowski sums/differences.
+
+This module provides geometric utility functions for calculating Minkowski sums
+and differences (including containment/erosion for IFP) to determine valid
+placement zones for nesting operations.
+"""
 import math
+import threading
 from shapely.geometry import Polygon, MultiPoint
 from shapely.ops import unary_union, triangulate
 from shapely.affinity import rotate, scale, translate
 
 from ....datatypes.shape import Shape
 
+_decomposition_lock = threading.Lock()
 
 def decompose_if_needed(polygon, logger):
-    """Decomposes a non-convex polygon into convex parts."""
+    """Decomposes a non-convex polygon into convex parts (triangles)."""
     if not polygon or polygon.is_empty:
         return []
     
+    # Ensure valid geometry
+    if not polygon.is_valid:
+        polygon = polygon.buffer(0)
+    
+    # Use WKT for cache key
     cache_key = polygon.wkt
-    if Shape.decomposition_cache.get(cache_key):
-        return Shape.decomposition_cache.get(cache_key)
+    with _decomposition_lock:
+        if cache_key in Shape.decomposition_cache:
+            return Shape.decomposition_cache[cache_key]
 
     if polygon.geom_type == 'MultiPolygon':
         all_decomposed_parts = []
@@ -21,21 +35,40 @@ def decompose_if_needed(polygon, logger):
             all_decomposed_parts.extend(decompose_if_needed(p, logger))
         return all_decomposed_parts
 
-    if math.isclose(polygon.area, polygon.convex_hull.area):
-        return [polygon]
+    # If already convex-ish (triangle or area match convex hull), return as is
+    # Using a very strict tolerance for GPU kernel safety
+    is_convex = False
+    if polygon.geom_type == 'Polygon' and not polygon.interiors:
+        if len(polygon.exterior.coords) <= 4: # Triangle (4 coords including closure)
+            is_convex = True
+        elif math.isclose(polygon.area, polygon.convex_hull.area, rel_tol=1e-7):
+            is_convex = True
+            
+    if is_convex:
+        res = [polygon]
+        with _decomposition_lock:
+            Shape.decomposition_cache[cache_key] = res
+        return res
     
     try:
+        # Triangulation is the most robust decomposition for complex NFPs with holes
         triangles = triangulate(polygon)
-        decomposed = [tri for tri in triangles if polygon.contains(tri.representative_point())]
-        Shape.decomposition_cache[cache_key] = decomposed
+        decomposed = []
+        for tri in triangles:
+             # Only keep triangles that are inside the original polygon
+             if tri.area > 1e-9 and polygon.contains(tri.representative_point()):
+                 decomposed.append(tri)
+        
+        with _decomposition_lock:
+            Shape.decomposition_cache[cache_key] = decomposed
         return decomposed
     except Exception as e:
-        logger(f"      - Shapely triangulation not available or failed: {e}. Falling back to convex hull.", level="warning")
+        logger(f"      - Triangulation failed: {e}. Falling back to convex hull.", level="warning")
 
     result = [polygon.convex_hull]
-    Shape.decomposition_cache[cache_key] = result
+    with _decomposition_lock:
+        Shape.decomposition_cache[cache_key] = result
     return result
-
 
 def minkowski_sum_convex(poly1, poly2):
     """Computes the Minkowski sum of two convex polygons."""
@@ -52,11 +85,10 @@ def minkowski_sum_convex(poly1, poly2):
     # The convex hull of these summed points is the Minkowski sum.
     return MultiPoint(sum_vertices).convex_hull
 
-
 def minkowski_difference_convex(poly1, poly2):
     """
     Computes the erosion of poly1 by poly2, which is the Inner-Fit Polygon.
-    This is NOT the Minkowski Difference, which would enlarge the polygon.
+    This is NOT the Inner-Fit Polygon calculation (calculate_inner_fit_polygon), which would enlarge the polygon.
     """
     if not poly1 or poly1.is_empty or not poly2 or poly2.is_empty:
         return None
@@ -78,8 +110,7 @@ def minkowski_difference_convex(poly1, poly2):
     
     return eroded_poly
 
-
-def minkowski_difference(master_poly1, angle1, master_poly2, angle2, logger):
+def calculate_inner_fit_polygon(master_poly1, angle1, master_poly2, angle2, logger):
     """
     Computes the Inner-Fit Polygon for master_poly2 inside master_poly1.
     The IFP represents valid positions for poly2's CENTROID where poly2 fits inside poly1.
@@ -106,7 +137,7 @@ def minkowski_difference(master_poly1, angle1, master_poly2, angle2, logger):
         # Translate poly2 so its centroid is at origin
         p2_at_origin = translate(p2, xoff=-p2_centroid.x, yoff=-p2_centroid.y)
         
-        # Compute Minkowski difference
+        # Compute Inner-Fit Polygon
         diff = minkowski_difference_convex(poly1_exterior_only, p2_at_origin)
         pairwise_diffs.append(diff)
     
@@ -119,7 +150,6 @@ def minkowski_difference(master_poly1, angle1, master_poly2, angle2, logger):
         final_difference = final_difference.intersection(pairwise_diffs[i])
     
     return final_difference
-
 
 def minkowski_sum(master_poly1, angle1, reflect1, master_poly2, angle2, reflect2, logger, rot_origin1=None, rot_origin2=None):
     """
@@ -134,7 +164,6 @@ def minkowski_sum(master_poly1, angle1, reflect1, master_poly2, angle2, reflect2
     poly1_convex_parts = decompose_if_needed(master_poly1, logger)
     poly2_convex_parts = decompose_if_needed(master_poly2, logger)
 
-    # --- Transform Convex Parts ---
     # CRITICAL: Use the MASTER polygon's centroid for all transformations
     # to keep the decomposed convex parts in their correct relative positions.
     c1 = master_poly1.centroid

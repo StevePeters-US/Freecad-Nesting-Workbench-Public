@@ -16,7 +16,6 @@ from .shape_preparer import ShapePreparer
 from ...datatypes.shape import Shape
 from ...freecad_helpers import recursive_delete
 
-
 class Layout:
     """
     Represents a single layout attempt (population member in GA).
@@ -35,12 +34,10 @@ class Layout:
         self.fitness = float('inf')
         self.efficiency = 0.0
         self.genes = []                   # (part_id, angle) tuples - the "DNA" of this layout
-        self.contact_score = 0.0          # How much parts touch each other
     
     @property
     def name(self):
         return self.layout_group.Label if self.layout_group else "unknown"
-
 
 class LayoutManager:
     """
@@ -54,7 +51,7 @@ class LayoutManager:
         self._layout_counter = 0
     
     def create_layout(self, name, master_shapes_map, quantities, ui_params, 
-                      clone_from=None, chromosome_ordering=None) -> Layout:
+                      chromosome_ordering=None) -> Layout:
         """
         Creates a new layout with master shapes and part instances.
         
@@ -63,7 +60,6 @@ class LayoutManager:
             master_shapes_map: Dict mapping labels to FreeCAD shape objects
             quantities: Dict mapping labels to (quantity, rotation_steps)
             ui_params: UI parameters dict
-            clone_from: Optional Layout to clone masters from (for GA)
             chromosome_ordering: Optional list of (part_id, angle) tuples for ordering
             
         Returns:
@@ -130,13 +126,14 @@ class LayoutManager:
         
         return ordered_parts
     
-    def delete_layout(self, layout):
+    def delete_layout(self, layout, verbose=False):
         """
         Removes a layout group and ALL its children from the document.
         Must recursively delete children first since FreeCAD doesn't do this automatically.
         
         Args:
             layout: Layout object to delete
+            verbose: If True, log deletion
         """
         if not layout:
             return
@@ -164,7 +161,9 @@ class LayoutManager:
         # Recursively delete the group and all children
         if group_obj:
             recursive_delete(self.doc, group_obj)
-            FreeCAD.Console.PrintMessage(f"  Deleted: {layout_label}\n")
+            if verbose:
+                FreeCAD.Console.PrintMessage(f"  Deleted: {layout_label}\n")
+
     
 
     
@@ -203,77 +202,32 @@ class LayoutManager:
         # Add bounding box of last sheet
         last_sheet = layout.sheets[-1]
         if last_sheet.parts:
-            try:
-                min_x = min(p.shape.bounding_box()[0] for p in last_sheet.parts)
-                min_y = min(p.shape.bounding_box()[1] for p in last_sheet.parts)
-                max_x = max(p.shape.bounding_box()[0] + p.shape.bounding_box()[2] for p in last_sheet.parts)
-                max_y = max(p.shape.bounding_box()[1] + p.shape.bounding_box()[3] for p in last_sheet.parts)
+            min_x, min_y = float('inf'), float('inf')
+            max_x, max_y = float('-inf'), float('-inf')
+            found_valid = False
+            
+            for p in last_sheet.parts:
+                try:
+                    bx, by, bw, bh = p.shape.bounding_box()
+                    min_x = min(min_x, bx)
+                    min_y = min(min_y, by)
+                    max_x = max(max_x, bx + bw)
+                    max_y = max(max_y, by + bh)
+                    found_valid = True
+                except Exception as e:
+                    part_id = getattr(p.shape, 'id', 'unknown') if hasattr(p, 'shape') else 'unknown'
+                    FreeCAD.Console.PrintWarning(f"[LayoutManager] Bounding box failed for part '{part_id}': {e}\n")
+            
+            if found_valid:
                 fitness += (max_x - min_x) * (max_y - min_y)
-            except Exception:
-                pass
-        
-        # Contact score: reward parts that touch each other
-        # Lower fitness = better, so we subtract contact bonus
-        contact_bonus = self._calculate_contact_score(layout)
-        fitness -= contact_bonus
         
         layout.fitness = fitness
         layout.efficiency = efficiency
-        layout.contact_score = contact_bonus
-        
+
         return fitness, efficiency
     
-    def _calculate_contact_score(self, layout) -> float:
-        """
-        Calculate how much parts are in contact with each other.
-        Higher score = more contact = better packing.
-        
-        Uses buffer/touches approach: if buffered polygon touches another, they're in contact.
-        """
-        try:
-            from shapely.ops import unary_union
-        except ImportError:
-            return 0.0
-        
-        total_contact = 0.0
-        buffer_distance = 0.5  # Small buffer to detect "almost touching"
-        
-        for sheet in layout.sheets:
-            # Get parts that have a valid polygon (Shape.polygon, not bounds_polygon)
-            parts = [p for p in sheet.parts if hasattr(p, 'shape') and p.shape and p.shape.polygon]
-            
-            for i, part_a in enumerate(parts):
-                poly_a = part_a.shape.polygon
-                if not poly_a or poly_a.is_empty:
-                    continue
-                buffered_a = poly_a.buffer(buffer_distance)
-                
-                for part_b in parts[i+1:]:
-                    poly_b = part_b.shape.polygon
-                    if not poly_b or poly_b.is_empty:
-                        continue
-                    
-                    # Check if they touch or are very close
-                    if buffered_a.intersects(poly_b):
-                        # Calculate contact length (intersection of boundaries)
-                        try:
-                            intersection = buffered_a.intersection(poly_b)
-                            if intersection.is_empty:
-                                continue
-                            # Use length of intersection boundary as contact score
-                            if hasattr(intersection, 'length'):
-                                total_contact += intersection.length
-                            elif hasattr(intersection, 'area'):
-                                # For area-based contact, use sqrt to normalize
-                                total_contact += intersection.area ** 0.5
-                        except Exception:
-                            # Simple fallback: just count the contact
-                            total_contact += 10.0
-        
-        return total_contact
-    
     def create_ga_population(self, master_shapes_map, quantities, ui_params, 
-                             population_size, rotation_steps=1) -> list:
+                             population_size, rotation_steps=1, verbose=False) -> list:
         """
         Creates a population of layouts for genetic algorithm.
         
@@ -308,37 +262,8 @@ class LayoutManager:
                         part.set_rotation(angle)
             
             population.append(layout)
-            FreeCAD.Console.PrintMessage(f"Created layout {name} with {len(layout.parts)} parts\n")
+            if verbose:
+                FreeCAD.Console.PrintMessage(f"Created layout {name} with {len(layout.parts)} parts\n")
         
         return population
     
-    def select_elite(self, layouts, elite_count) -> list:
-        """
-        Selects the best layouts based on fitness.
-        
-        Args:
-            layouts: List of Layout objects (should be sorted by fitness already)
-            elite_count: Number of best layouts to keep
-            
-        Returns:
-            List of elite Layout objects
-        """
-        # Sort by fitness (lower is better)
-        sorted_layouts = sorted(layouts, key=lambda l: l.fitness)
-        return sorted_layouts[:elite_count]
-    
-    def cleanup_worst(self, layouts, keep_count):
-        """
-        Deletes the worst layouts, keeping only the top performers.
-        
-        Args:
-            layouts: List of Layout objects
-            keep_count: Number of best layouts to keep
-        """
-        # Sort by fitness (lower is better)
-        sorted_layouts = sorted(layouts, key=lambda l: l.fitness)
-        
-        # Delete layouts beyond keep_count
-        for layout in sorted_layouts[keep_count:]:
-            FreeCAD.Console.PrintMessage(f"Deleting layout {layout.name} (efficiency: {layout.efficiency:.1f}%)\n")
-            self.delete_layout(layout)

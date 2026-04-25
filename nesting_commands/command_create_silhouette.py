@@ -20,7 +20,7 @@ class CreateSilhouetteCommand:
     def GetResources(self):
         """Defines the command's appearance in FreeCAD."""
         return {
-            'Pixmap': 'Silhouette_Icon.svg',
+            'Pixmap': 'Silhouette_Icon.png',
             'MenuText': 'Create Silhouette',
             'ToolTip': 'Creates a 2D silhouette (outline) from the selected 3D object(s).'
         }

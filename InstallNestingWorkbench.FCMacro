@@ -1,0 +1,113 @@
+import os
+import shutil
+import urllib.request
+import zipfile
+import FreeCAD
+import FreeCADGui
+from PySide6 import QtWidgets, QtCore
+
+# Configuration
+REPO_OWNER = "StevePeters-US"
+REPO_NAME = "Freecad-Nesting-Workbench"
+DEFAULT_BRANCH = "main"
+
+def log(msg, level="info"):
+    if level == "error":
+        FreeCAD.Console.PrintError(f"[NestingInstall] {msg}\n")
+    elif level == "warning":
+        FreeCAD.Console.PrintWarning(f"[NestingInstall] {msg}\n")
+    else:
+        FreeCAD.Console.PrintMessage(f"[NestingInstall] {msg}\n")
+
+class BranchDialog(QtWidgets.QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Nesting Workbench Installer")
+        self.branch = DEFAULT_BRANCH
+        
+        layout = QtWidgets.QVBoxLayout(self)
+        
+        label = QtWidgets.QLabel("Select the branch to download (usually 'main'):")
+        layout.addWidget(label)
+        
+        self.branch_input = QtWidgets.QLineEdit(DEFAULT_BRANCH)
+        layout.addWidget(self.branch_input)
+        
+        btn_layout = QtWidgets.QHBoxLayout()
+        self.ok_btn = QtWidgets.QPushButton("Install")
+        self.cancel_btn = QtWidgets.QPushButton("Cancel")
+        
+        self.ok_btn.clicked.connect(self.accept)
+        self.cancel_btn.clicked.connect(self.reject)
+        
+        btn_layout.addWidget(self.ok_btn)
+        btn_layout.addWidget(self.cancel_btn)
+        layout.addLayout(btn_layout)
+
+    def get_branch(self):
+        return self.branch_input.text()
+
+def install_workbench():
+    # 1. Ask for branch
+    dialog = BranchDialog(FreeCADGui.getMainWindow())
+    if dialog.exec_() != QtWidgets.QDialog.Accepted:
+        log("Installation cancelled by user.")
+        return
+    
+    branch = dialog.get_branch()
+    
+    # 2. Setup paths
+    mod_dir = os.path.join(FreeCAD.getUserAppDataDir(), "Mod")
+    if not os.path.exists(mod_dir):
+        os.makedirs(mod_dir)
+        log(f"Created Mod directory: {mod_dir}")
+    
+    target_dir = os.path.join(mod_dir, REPO_NAME)
+    temp_zip = os.path.join(mod_dir, "nw_temp.zip")
+    
+    # 3. Download ZIP
+    url = f"https://github.com/StevePeters-US/{REPO_NAME}/archive/refs/heads/{branch}.zip"
+    log(f"Downloading {url}...")
+    
+    try:
+        urllib.request.urlretrieve(url, temp_zip)
+    except Exception as e:
+        log(f"Failed to download: {e}", "error")
+        return
+
+    # 4. Handle existing installation
+    if os.path.exists(target_dir):
+        backup_dir = target_dir + "_backup"
+        log(f"Existing installation found. Moving to {backup_dir}")
+        if os.path.exists(backup_dir):
+            shutil.rmtree(backup_dir)
+        os.rename(target_dir, backup_dir)
+
+    # 5. Extract
+    log("Extracting ZIP...")
+    try:
+        with zipfile.ZipFile(temp_zip, 'r') as zip_ref:
+            zip_ref.extractall(mod_dir)
+            # The folder name inside zip is usually REPO_NAME-branch
+            extracted_folder = os.path.join(mod_dir, f"{REPO_NAME}-{branch}")
+            if os.path.exists(extracted_folder):
+                os.rename(extracted_folder, target_dir)
+            else:
+                # Fallback if the folder name is different (sometimes it's REPO_NAME-main for master)
+                # Try to find the folder that was just extracted
+                folders = [f for f in os.listdir(mod_dir) if f.startswith(REPO_NAME) and os.path.isdir(os.path.join(mod_dir, f)) and f != REPO_NAME]
+                if folders:
+                    newest_folder = max([os.path.join(mod_dir, f) for f in folders], key=os.path.getctime)
+                    os.rename(newest_folder, target_dir)
+    except Exception as e:
+        log(f"Failed to extract: {e}", "error")
+        return
+    finally:
+        if os.path.exists(temp_zip):
+            os.remove(temp_zip)
+
+    log(f"Installation successful! Please restart FreeCAD to see the Nesting Workbench.", "info")
+    QtWidgets.QMessageBox.information(None, "Success", "Nesting Workbench installed successfully.\n\nPlease restart FreeCAD.")
+
+if __name__ == "__main__":
+    install_workbench()

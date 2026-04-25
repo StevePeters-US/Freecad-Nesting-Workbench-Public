@@ -4,27 +4,61 @@ A workbench for 2D nesting of shapes in FreeCAD, utilizing the Minkowski Sum alg
 
 ## Installation
 
-### Prerequisites
+There are three ways to install the Nesting Workbench. Choose the one that best suits your needs.
 
-This workbench requires the `shapely` Python library to be installed in your FreeCAD environment.
+### Path A: Automated Installation (Recommended)
 
-#### Windows Installation Instructions
+This is the easiest method. It uses a FreeCAD macro to download and install the workbench automatically.
 
-1.  Open a terminal (Command Prompt or PowerShell).
-2.  Navigate to the `bin` directory of your FreeCAD installation. Default is usually:
-    ```cmd
-    cd "C:\Program Files\FreeCAD 1.0\bin"
+1.  **Download the Macro:** Download [InstallNestingWorkbench.FCMacro](InstallNestingWorkbench.FCMacro) from this repository.
+2.  **Run in FreeCAD:**
+    *   Open FreeCAD.
+    *   Go to **Macro -> Macros...**
+    *   Click **Open** and select the `InstallNestingWorkbench.FCMacro` file.
+    *   Click **Execute**.
+3.  **Follow Prompts:** The macro will ask you which branch to install (default is `main`). Click **Install**.
+4.  **Restart FreeCAD:** Once finished, restart FreeCAD to see the **Nesting** workbench in the workbench selector.
+
+---
+
+### Path B: Manual Installation (GitHub Download)
+
+If you prefer to install manually, follow these steps:
+
+1.  **Download the ZIP:** Click the green **Code** button on GitHub and select **Download ZIP**.
+2.  **Locate your Mod Directory:**
+    *   **Windows:** `%APPDATA%\FreeCAD\Mod` (usually `C:\Users\<User>\AppData\Roaming\FreeCAD\Mod`)
+    *   **Linux:** `~/.local/share/FreeCAD/Mod`
+    *   **macOS:** `~/Library/Application Support/FreeCAD/Mod`
+3.  **Extract:** Unzip the downloaded file into the `Mod` directory.
+4.  **Rename:** Rename the extracted folder (e.g., `Freecad-Nesting-Workbench-main`) to exactly `Freecad-Nesting-Workbench`.
+5.  **Restart FreeCAD.**
+
+---
+
+### Path C: Advanced Installation (Developer / Symlink)
+
+For developers or users who want to keep the repository in a custom location and stay updated via `git`:
+
+1.  **Clone the Repo:**
+    ```bash
+    git clone https://github.com/StevePeters-US/Freecad-Nesting-Workbench.git /path/to/your/dev/folder
     ```
-    *(Note: Adjust the path if you installed FreeCAD in a different location or version)*
-3.  Ensure `pip` is installed:
-    ```cmd
-    python -m ensurepip
-    ```
-4.  Install `shapely`:
-    ```cmd
-    python -m pip install shapely
-    ```
-5.  **Restart FreeCAD** for the changes to take effect.
+2.  **Create a Symlink:**
+    Create a symbolic link (or junction on Windows) from your FreeCAD `Mod` directory to the cloned folder.
+
+    *   **Windows (PowerShell):**
+        ```powershell
+        New-Item -ItemType Junction -Path "$env:APPDATA\FreeCAD\Mod\Freecad-Nesting-Workbench" -Target "C:\path\to\your\dev\folder"
+        ```
+    *   **Linux / macOS:**
+        ```bash
+        ln -s /path/to/your/dev/folder ~/.local/share/FreeCAD/Mod/Freecad-Nesting-Workbench
+        ```
+3.  **Restart FreeCAD.**
+
+---
+
 
 ## Usage Guide
 

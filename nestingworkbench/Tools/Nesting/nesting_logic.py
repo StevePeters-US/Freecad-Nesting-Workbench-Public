@@ -1,12 +1,58 @@
-from PySide import QtGui
+from PySide import QtCore, QtGui
 import FreeCAD
+import FreeCADGui
 import Part
 import copy
 
 from .algorithms import nesting_strategy
+from .algorithms import physics_nester
+from .visualization_manager import VisualizationManager
+
+class _MainThreadRelay(QtCore.QObject):
+    """QObject that lives on the main thread.
+    Signals emitted from worker threads are queued and execute on the main thread.
+    """
+    _fn_signal = QtCore.Signal(object)
+
+    def __init__(self):
+        super().__init__()
+        # QueuedConnection guarantees the slot runs on this object's (main) thread
+        self._fn_signal.connect(self._run, QtCore.Qt.QueuedConnection)
+
+    def _run(self, fn):
+        try:
+            fn()
+        except Exception as e:
+            FreeCAD.Console.PrintWarning(f"[MainThreadRelay] Callback error: {e}\n")
+
+    def post(self, fn):
+        """Post callable to be executed on the main thread."""
+        self._fn_signal.emit(fn)
+
+# Created once at module load time (always the main thread)
+_main_thread_relay = _MainThreadRelay()
+
+def _main_thread_wrapper(fn):
+    """Wraps a callback so it always executes on the main thread.
+
+    Uses a relay QObject signal (QueuedConnection) so the callable is
+    correctly posted to the main thread's event loop regardless of which
+    thread calls the wrapper.
+    """
+    def wrapper(*args, **kwargs):
+        app = QtGui.QApplication.instance()
+        if not app:
+            fn(*args, **kwargs)
+            return
+
+        if QtCore.QThread.currentThread() == app.thread():
+            fn(*args, **kwargs)
+        else:
+            _main_thread_relay.post(lambda: fn(*args, **kwargs))
+    return wrapper
 
 class NestingDependencyError(Exception):
-    """Custom exception for missing optional dependencies like Shapely."""
+# ... (rest of class)
     pass
 
 try:
@@ -17,73 +63,42 @@ try:
 except ImportError:
     SHAPELY_AVAILABLE = False
 
-# Global reference for trial visualization object
-_trial_viz_obj = None
+# Global manager removed to improve testability and thread safety (CR-118)
 
-def _draw_trial_bounds(part, angle, x, y):
-    """Draws the boundary polygon at a trial position during simulation."""
-    global _trial_viz_obj
-    
+def _visualize_trial_placement(part, angle, x, y, viz_manager):
+# ... (rest of function)
+    if not viz_manager: return
     doc = FreeCAD.ActiveDocument
     if not doc or not FreeCAD.GuiUp:
         return
     
-    # Get or create the trial visualization object
-    if _trial_viz_obj is None or _trial_viz_obj.Name not in [o.Name for o in doc.Objects]:
-        _trial_viz_obj = doc.addObject("Part::Feature", "TrialBounds")
-        if hasattr(_trial_viz_obj, "ViewObject"):
-            _trial_viz_obj.ViewObject.LineColor = (0.0, 0.5, 1.0)  # Blue
-            _trial_viz_obj.ViewObject.LineWidth = 1.5
-            _trial_viz_obj.ViewObject.Transparency = 50
-    
     try:
         # Get the boundary polygon from the part
         if hasattr(part, 'polygon') and part.polygon:
-            # Rotate and translate the polygon to the trial position
+            # Rotate and translate the polygon to the trial position.
+            # x,y is the target centroid position; translate by the delta from current centroid.
             rotated_poly = rotate(part.polygon, angle, origin='centroid')
-            translated_poly = translate(rotated_poly, xoff=x, yoff=y)
+            cx, cy = rotated_poly.centroid.x, rotated_poly.centroid.y
+            translated_poly = translate(rotated_poly, xoff=x - cx, yoff=y - cy)
             
             # Convert shapely polygon to FreeCAD wire
             coords = list(translated_poly.exterior.coords)
             points = [FreeCAD.Vector(c[0], c[1], 0) for c in coords]
             wire = Part.makePolygon(points)
-            _trial_viz_obj.Shape = wire
             
-            # Force UI update
-            QtGui.QApplication.processEvents()
+            # Use the visualization manager to draw
+            viz_manager.draw_trial_placement(doc, wire)
     except Exception as e:
-        pass  # Silently ignore drawing errors
+        FreeCAD.Console.PrintWarning(f"[nesting_logic] Draw failed: {e}\n")
 
-def _cleanup_trial_viz():
-    """Removes the trial visualization object and simulation sheet boundaries."""
-    global _trial_viz_obj
-    if _trial_viz_obj:
-        try:
-            doc = FreeCAD.ActiveDocument
-            if doc and _trial_viz_obj.Name in [o.Name for o in doc.Objects]:
-                doc.removeObject(_trial_viz_obj.Name)
-        except:
-            pass
-        _trial_viz_obj = None
-    
-    # Clean up simulation sheet boundaries
-    try:
-        doc = FreeCAD.ActiveDocument
-        if doc:
-            to_remove = [o.Name for o in doc.Objects if o.Label.startswith("sim_sheet_boundary_")]
-            for name in to_remove:
-                try:
-                    doc.removeObject(name)
-                except:
-                    pass
-    except:
-        pass
-
-# --- Master Shape Highlighting ---
-_current_highlighted_master = None  # Track the currently highlighted master container
+def _cleanup_trial_viz(viz_manager):
+# ... (rest of function)
+    if not viz_manager: return
+    doc = FreeCAD.ActiveDocument
+    viz_manager.clear_trial_placement(doc)
 
 def _find_master_container_for_part(part):
-    """Finds the master container corresponding to a part being placed."""
+# ... (rest of function)
     doc = FreeCAD.ActiveDocument
     if not doc:
         return None
@@ -108,78 +123,32 @@ def _find_master_container_for_part(part):
             continue
     return None
 
-def _highlight_master(master_container, highlight):
-    """Sets the highlighting state for a master container's boundary."""
-    if master_container and hasattr(master_container, "Group"):
-        for child in master_container.Group:
-            if hasattr(child, "BoundaryObject") and child.BoundaryObject:
-                boundary = child.BoundaryObject
-                if hasattr(boundary, "ViewObject"):
-                    if highlight:
-                        boundary.ViewObject.Visibility = True
-                        boundary.ViewObject.LineColor = (0.0, 0.8, 0.0)  # Green
-                        boundary.ViewObject.LineWidth = 3.0
-                    else:
-                        boundary.ViewObject.Visibility = False
-                        boundary.ViewObject.LineColor = (1.0, 0.0, 0.0)  # Red
-                        boundary.ViewObject.LineWidth = 2.0
-
-def _on_part_start(part):
-    """Called when starting to place a part - highlight the master shape's boundary if it's a new master."""
-    global _current_highlighted_master
-    
+def _on_part_start(part, viz_manager):
+# ... (rest of function)
+    if not viz_manager: return
     master_container = _find_master_container_for_part(part)
     if master_container:
-        # Only switch highlighting if it's a different master
-        if _current_highlighted_master != master_container:
-            # Unhighlight the previous master
-            if _current_highlighted_master:
-                _highlight_master(_current_highlighted_master, False)
-            # Highlight the new master
-            _highlight_master(master_container, True)
-            _current_highlighted_master = master_container
-            QtGui.QApplication.processEvents()
+        viz_manager.highlight_master(master_container)
 
-def _on_part_end(part, placed):
-    """Called after part is placed - we don't unhighlight here, we wait for a new master type."""
-    # Don't unhighlight here - keep it on until we switch to a different master
+def _on_part_end(part, placed, viz_manager):
+# ... (rest of function)
     pass
 
-def _cleanup_highlighting():
-    """Called after nesting completes to ensure all highlighting is removed."""
-    global _current_highlighted_master
-    if _current_highlighted_master:
-        _highlight_master(_current_highlighted_master, False)
-        _current_highlighted_master = None
+def _cleanup_highlighting(viz_manager):
+# ... (rest of function)
+    if viz_manager:
+        viz_manager.clear_highlight()
 
-# --- Public Function ---
-def nest(parts, width, height, rotation_steps=1, simulate=False, **kwargs):
+def nest(parts, width, height, rotation_steps=1, simulate=False, algorithm='Minkowski', viz_manager=None, **kwargs):
     """
     Convenience function to run the nesting algorithm.
-    
-    Args:
-        parts: List of Shape objects to nest
-        width: Sheet width
-        height: Sheet height
-        rotation_steps: Number of rotation steps
-        simulate: If True, shows simulation with callbacks
-        **kwargs: Additional arguments for the nester (including progress_callback)
     """
-    global _trial_viz_obj
     from ...datatypes.shape import Shape
     
-    # Extract progress callback if present (not strictly needed as it goes into kwargs, but good for clarity)
-    # progress_callback = kwargs.get('progress_callback')
-    
-    # Only clear NFP cache if explicitly requested by the user (expensive to recompute)
     if kwargs.pop('clear_nfp_cache', False):
         Shape.clear_nfp_cache()
-    
-    # If simulation is enabled, the nester needs the original list of parts
-    # that are linked to the visible FreeCAD objects (fc_object).
-    # If simulation is disabled, we MUST use a deepcopy to prevent the nester
-    # from modifying the original part objects that the controller will use for
-    # the final drawing step.
+
+    sort = kwargs.pop('sort', True)
     parts_to_process = parts if simulate else copy.deepcopy(parts)
 
     steps = 0
@@ -188,44 +157,51 @@ def nest(parts, width, height, rotation_steps=1, simulate=False, **kwargs):
 
     if not SHAPELY_AVAILABLE:
         show_shapely_installation_instructions()
-        raise NestingDependencyError("The selected algorithm requires the 'Shapely' library, which is not installed.")
+        raise NestingDependencyError("The selected algorithm requires the 'Shapely' library.")
 
-    # If simulation is enabled, add callbacks to kwargs
+    # If simulation is enabled, ensure we have a viz_manager and bind callbacks
     if simulate:
-        kwargs['trial_callback'] = _draw_trial_bounds
-        kwargs['part_start_callback'] = _on_part_start
-        kwargs['part_end_callback'] = _on_part_end
+        if viz_manager is None:
+            viz_manager = VisualizationManager()
+            
+        kwargs['trial_callback'] = _main_thread_wrapper(
+            lambda p, a, x, y: _visualize_trial_placement(p, a, x, y, viz_manager)
+        )
+        kwargs['part_start_callback'] = _main_thread_wrapper(
+            lambda p: _on_part_start(p, viz_manager)
+        )
+        kwargs['part_end_callback'] = lambda p, pl: _on_part_end(p, pl, viz_manager)
 
-    # The controller now passes a fresh list of all parts to be nested.
-    nester = nesting_strategy.Nester(width, height, rotation_steps, **kwargs)
+    if algorithm == 'Physics':
+        nester = physics_nester.PhysicsNester(width, height, rotation_steps, **kwargs)
+    else:
+        nester = nesting_strategy.Nester(width, height, rotation_steps, **kwargs)
 
-    # If simulation is enabled, pass a callback that can draw the sheet state.
     if simulate:
-        nester.update_callback = lambda part, sheet: (sheet.draw(FreeCAD.ActiveDocument, {}, transient_part=part), QtGui.QApplication.processEvents())
+        nester.update_callback = _main_thread_wrapper(
+            lambda part, sheet: (sheet.draw(FreeCAD.ActiveDocument, {}, transient_part=part), FreeCADGui.updateGui())
+        )
 
     import time
     start_time = time.monotonic()
-    result = nester.nest(parts_to_process)
+    result = nester.nest(parts_to_process, sort=sort)
     elapsed = time.monotonic() - start_time
     
-    # Cleanup trial visualization and highlighting
     if simulate:
-        _cleanup_trial_viz()
-        _cleanup_highlighting()
+        # These access FreeCAD doc objects and ViewObject — must run on main thread
+        _main_thread_wrapper(lambda: _cleanup_trial_viz(viz_manager))()
+        _main_thread_wrapper(lambda: _cleanup_highlighting(viz_manager))()
     
-    # Some nesters may return a 3-tuple (sheets, unplaced, steps), while others
-    # may return a 2-tuple (sheets, unplaced). We handle both cases here.
     if len(result) == 3:
         sheets, unplaced, steps = result
     else:
         sheets, unplaced = result
 
-    # Calculate and display packing efficiency
-    _calculate_efficiency(sheets)
+    _calculate_efficiency(sheets, verbose=kwargs.get('verbose', False))
 
     return sheets, unplaced, steps, elapsed
 
-def _calculate_efficiency(sheets):
+def _calculate_efficiency(sheets, verbose=False):
     """Calculates and displays sheet packing efficiency."""
     if not sheets:
         return
@@ -233,7 +209,8 @@ def _calculate_efficiency(sheets):
     total_parts_area = 0
     total_sheet_area = 0
     
-    FreeCAD.Console.PrintMessage("\n--- PACKING EFFICIENCY ---\n")
+    if verbose:
+        FreeCAD.Console.PrintMessage("\n--- PACKING EFFICIENCY ---\n")
     
     for i, sheet in enumerate(sheets):
         sheet_area = sheet.width * sheet.height
@@ -242,15 +219,17 @@ def _calculate_efficiency(sheets):
         total_sheet_area += sheet_area
         total_parts_area += parts_area
         
-        if sheet_area > 0:
+        if verbose and sheet_area > 0:
             efficiency = (parts_area / sheet_area) * 100
             FreeCAD.Console.PrintMessage(f"  Sheet {i+1}: {efficiency:.1f}% ({parts_area:.0f} / {sheet_area:.0f} mm²)\n")
     
     if total_sheet_area > 0:
         overall_efficiency = (total_parts_area / total_sheet_area) * 100
-        FreeCAD.Console.PrintMessage(f"  Overall: {overall_efficiency:.1f}% ({total_parts_area:.0f} / {total_sheet_area:.0f} mm²)\n")
-    
-    FreeCAD.Console.PrintMessage("--------------------------\n")
+        if verbose:
+            FreeCAD.Console.PrintMessage(f"  Overall: {overall_efficiency:.1f}% ({total_parts_area:.0f} / {total_sheet_area:.0f} mm²)\n")
+            FreeCAD.Console.PrintMessage("--------------------------\n")
+        else:
+            FreeCAD.Console.PrintMessage(f"Packing Efficiency: {overall_efficiency:.1f}%\n")
 
 def show_shapely_installation_instructions():
     msg_box = QtGui.QMessageBox()
