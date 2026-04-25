@@ -5,7 +5,6 @@ import random
 from shapely.geometry import Polygon
 from shapely.affinity import translate, rotate
 from shapely.ops import unary_union
-from PySide import QtGui
 import FreeCAD
 from ....datatypes.sheet import Sheet
 from ....datatypes.placed_part import PlacedPart
@@ -102,9 +101,6 @@ class BaseNester(object):
                     placed = True
                 else:
                     unplaced_parts.append(part)
-
-            # Keep UI alive
-            QtGui.QApplication.processEvents()
 
         return self.sheets, unplaced_parts
 

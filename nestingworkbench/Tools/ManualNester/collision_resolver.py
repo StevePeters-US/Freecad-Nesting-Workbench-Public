@@ -172,34 +172,6 @@ class CollisionResolver:
                 return True
         return False
 
-    def resolve_bi_collision(self, obj_a, obj_b):
-        """Symmetrically separates two objects. Returns True if they were overlapping.
-
-        Updates the cache only — does not write obj.Placement.
-        """
-        entry_a = self._get_entry(obj_a)
-        entry_b = self._get_entry(obj_b)
-        if not entry_a or not entry_b:
-            return False
-
-        if self._entries_intersect(entry_a, entry_b):
-            bb_a = entry_a['bbox']
-            bb_b = entry_b['bbox']
-            ox = min(bb_a['max_x'], bb_b['max_x']) - max(bb_a['min_x'], bb_b['min_x']) + 0.001
-            oy = min(bb_a['max_y'], bb_b['max_y']) - max(bb_a['min_y'], bb_b['min_y']) + 0.001
-
-            if ox < oy:
-                shift = ox / 2.0
-                dir_x = 1.0 if bb_a['center_x'] > bb_b['center_x'] else -1.0
-                self._translate_entry(obj_a, shift * dir_x, 0)
-                self._translate_entry(obj_b, -shift * dir_x, 0)
-            else:
-                shift = oy / 2.0
-                dir_y = 1.0 if bb_a['center_y'] > bb_b['center_y'] else -1.0
-                self._translate_entry(obj_a, 0, shift * dir_y)
-                self._translate_entry(obj_b, 0, -shift * dir_y)
-            return True
-        return False
 
     def overlaps_any(self, obj, others):
         """Returns True if obj overlaps any shape in others."""
@@ -422,11 +394,6 @@ class CollisionResolver:
             return self._cache[key]
         return self._compute_entry(obj)
 
-    # Keep the old name as an alias so callers in manual_nester_tool.py that
-    # reference _get_abs_bbox directly (e.g. invalidation checks) still work.
-    def _get_abs_bbox(self, obj):
-        entry = self._get_entry(obj)
-        return entry['bbox'] if entry else None
 
     def _compute_entry(self, obj):
         """Compute bbox dict + Shapely polygon for obj. Returns None if no shape found."""

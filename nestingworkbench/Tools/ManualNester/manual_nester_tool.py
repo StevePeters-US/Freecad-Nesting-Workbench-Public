@@ -279,9 +279,6 @@ class ManualNesterToolObserver:
         # Track objects in the layout
         self._track_layout_objects()
 
-        # Track objects in MasterShapes for picking
-        self._track_master_objects()
-
         # 4. Always add a fresh drop-zone sheet
         self._add_drop_zone_sheet()
 
@@ -383,15 +380,6 @@ class ManualNesterToolObserver:
                         self.original_visibilities[sheet_boundary.Name + "_selectable"] = sheet_boundary.ViewObject.Selectable
                         sheet_boundary.ViewObject.Selectable = False
 
-    def _track_master_objects(self):
-        """Tracks master shapes so we can identify them during picking."""
-        if not self.master_group: return
-        for obj in self.master_group.Group:
-            # Master objects are usually App::Part containing a Part::Feature
-            if obj.isDerivedFrom("App::Part") or hasattr(obj, "Shape"):
-                # We don't store placement for masters in original_placements
-                # because we don't want to move them, but we might pick them.
-                pass
 
     def _track_single_object(self, obj, sheet_group=None):
         self.original_placements[obj] = obj.Placement.copy()

@@ -77,26 +77,18 @@ class NestingWorker(QThread):
 class NestingJob:
     """
     Manages a single nesting session using the Sandbox Pattern.
-    - Creates a temporary environment (Layout_temp).
-    - Runs the nesting algorithm.
-    - Commits results to a permanent target layout or discards them on cancel.
-    """
-    def __init__(self, doc, target_layout, ui_params, preparer):
-        self.doc = doc
-        self.target_layout = target_layout
-        self.params = ui_params
-        self.preparer = preparer
-        
-        self.temp_layout = None
-        self.parts_group = None # The "PartsToPlace" bin
-        self.sheets = []
-        
-        self._owned_object_names: set[str] = set()
-        self._init_sandbox()
+    Receives a completed GA layout via from_ga_result() and either commits
+    it to the target layout or discards it on cancel.
 
+    NOTE: Direct instantiation is not supported. Always use from_ga_result().
+    """
     @classmethod
     def from_ga_result(cls, doc, target_layout, params, preparer, layout_group, parts_group, sheets):
-        """Creates a NestingJob from a completed GA layout, bypassing sandbox creation."""
+        """Creates a NestingJob from a completed GA layout.
+
+        This is the sole entry point. The GACoordinator and LayoutManager own
+        the sandbox lifecycle; this class only handles commit/cancel.
+        """
         job = cls.__new__(cls)
         job.doc = doc
         job.target_layout = target_layout
@@ -105,108 +97,14 @@ class NestingJob:
         job.temp_layout = layout_group
         job.parts_group = parts_group
         job.sheets = sheets
-        
+
         job._owned_object_names = set()
         if layout_group: job._owned_object_names.add(layout_group.Name)
         if parts_group: job._owned_object_names.add(parts_group.Name)
-        
+
         return job
 
-    def _init_sandbox(self):
-        """Creates the temporary layout and parts bin."""
-        self.temp_layout = self.doc.addObject("App::DocumentObjectGroup", "Layout_temp")
-        self.parts_group = self.doc.addObject("App::DocumentObjectGroup", "PartsToPlace")
-        
-        self._owned_object_names.add(self.temp_layout.Name)
-        self._owned_object_names.add(self.parts_group.Name)
-        
-        self.temp_layout.addObject(self.parts_group)
-        
-        if hasattr(self.temp_layout, "ViewObject"):
-            self.temp_layout.ViewObject.Visibility = True
-            
 
-
-    def run(self, quantities, master_map, rotation_params, algo_kwargs, is_simulating=False, viz_manager=None):
-        """Executes the nesting logic: Prepare -> Nest -> Draw."""
-        
-        # 1. Prepare Shapes
-        parts_to_nest = self.preparer.prepare_parts(
-            self.params, quantities, master_map, self.temp_layout, self.parts_group
-        )
-        
-        if not parts_to_nest:
-            raise ValueError("No valid parts to nest.")
-
-        # 1.5 Persist Metadata (Quantity, Rotations) to Master Containers
-        self._persist_metadata(quantities, rotation_params)
-
-        # 2. Run Algorithm
-        # Ensure verbose is in algo_kwargs if present in params
-        if 'verbose_logging' in self.params:
-            algo_kwargs['verbose'] = self.params['verbose_logging']
-
-        self.sheets, unplaced, steps, elapsed = nest(
-            parts_to_nest, 
-            self.params['sheet_width'], 
-            self.params['sheet_height'],
-            self.params['rotation_steps'], 
-            is_simulating, 
-            viz_manager=viz_manager,
-            **algo_kwargs
-        )
-        
-        # Warn about unplaced parts
-        if unplaced:
-            unplaced_ids = [p.id for p in unplaced]
-            FreeCAD.Console.PrintWarning(f"WARNING: {len(unplaced)} part(s) could not be placed: {unplaced_ids}\n")
-        
-        if not is_simulating:
-            self._apply_placement(self.sheets, parts_to_nest)
-            
-        # 3. Draw Results (into Temp Layout)
-        # Note: sheet.draw now handles unlinking from PartsToPlace!
-        verbose = self.params.get('verbose_logging', False)
-        for sheet in self.sheets:
-            sheet.draw(self.doc, self.params, self.temp_layout, parts_to_place_group=self.parts_group, verbose=verbose)
-            
-        return len(self.sheets), sum(len(s) for s in self.sheets)
-
-    def _persist_metadata(self, quantities, rotation_params):
-        master_group = self.temp_layout.getObject("MasterShapes")
-        if not master_group:
-            FreeCAD.Console.PrintWarning("[NestingJob] MasterShapes group not found in sandbox, cannot persist metadata.\n")
-            return
-        
-        for container in master_group.Group:
-             if not hasattr(container, "Group"): continue
-             
-             # Find inner shape label
-             shape = next((c for c in container.Group if c.Label.startswith("master_shape_")), None)
-             if shape:
-                 original_label = shape.Label.replace("master_shape_", "")
-                 
-                 # Save Quantity
-                 # quantities dict is {label: (qty, rotation_steps)}
-                 qty_tuple = quantities.get(original_label) 
-                 if qty_tuple:
-                     qty = qty_tuple[0]
-                     if not hasattr(container, "Quantity"):
-                         container.addProperty("App::PropertyInteger", "Quantity", "Nesting", "Part Quantity")
-                     container.Quantity = qty
-
-                 # Save Rotation Overrides
-                 if original_label in rotation_params:
-                     # rotation_params is {label: (val, override_bool)}
-                     r_val, r_override = rotation_params[original_label]
-                     
-                     if not hasattr(container, "PartRotationSteps"):
-                          container.addProperty("App::PropertyInteger", "PartRotationSteps", "Nesting", "Rotation steps")
-                     if not hasattr(container, "PartRotationOverride"):
-                          container.addProperty("App::PropertyBool", "PartRotationOverride", "Nesting", "Override global rotation")
-                     
-                     container.PartRotationSteps = int(r_val)
-                     container.PartRotationOverride = bool(r_override)
 
     def commit(self):
         """Promotes the temporary results to the target layout."""
@@ -278,16 +176,6 @@ class NestingJob:
 
 
 
-    def _apply_placement(self, sheets, parts_to_nest):
-        original_parts_map = {part.id: part for part in parts_to_nest}
-        for sheet in sheets:
-            for i, placed_part in enumerate(sheet.parts):
-                 original_part = original_parts_map[placed_part.shape.id]
-                 # Calculate placement relative to sheet origin
-                 # Calculate placement relative to sheet origin
-                 sheet_origin = sheet.get_origin()
-                 original_part.placement = placed_part.shape.get_final_placement(sheet_origin)
-                 sheet.parts[i].shape = original_part
 
     def _apply_properties(self, layout_obj):
         p = self.params
