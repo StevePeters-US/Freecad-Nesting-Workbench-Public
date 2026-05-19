@@ -2,6 +2,8 @@
 
 A workbench for 2D nesting of shapes in FreeCAD, utilizing the Minkowski Sum algorithm for efficient packing.
 
+[![GitHub Sponsors](https://img.shields.io/badge/Sponsor-GitHub%20Sponsors-ea4aaa?style=flat&logo=github-sponsors)](https://github.com/sponsors/StevePeters-US)
+
 ## Installation
 
 There are three ways to install the Nesting Workbench. Choose the one that best suits your needs.
