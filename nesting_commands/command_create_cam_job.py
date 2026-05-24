@@ -32,8 +32,6 @@ class CAMOptionsDialog(QtWidgets.QDialog):
         self.silhouettes_checkbox.setChecked(False)
         layout.addWidget(self.silhouettes_checkbox)
         
-        layout.addWidget(self.silhouettes_checkbox)
-        
         # Separator
         layout.addSpacing(10)
 
@@ -107,8 +105,6 @@ class CAMOptionsDialog(QtWidgets.QDialog):
                         if full_path not in found_templates:
                             self.template_combo.addItem(f, full_path)
                             found_templates.add(full_path)
-                except Exception:
-                    pass
                 except Exception:
                     pass
     
