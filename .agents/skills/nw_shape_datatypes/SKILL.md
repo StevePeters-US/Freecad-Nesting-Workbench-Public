@@ -1,3 +1,8 @@
+---
+name: nw_shape_datatypes
+description: Shape, Sheet, and PlacedPart data type contracts and gotchas. Read before modifying Shape, Sheet, or PlacedPart classes.
+---
+
 # Skill: Shape Data Types
 
 > Read this before modifying Shape, Sheet, or PlacedPart classes.
@@ -27,7 +32,7 @@ Key methods:
 - `draw()` — places FreeCAD objects at computed positions
 - `is_placement_valid()` — checks if a part fits
 - `calculate_fill_percentage()` — computes area utilization
-- `_draw_single_part()` — ~140 lines, needs splitting (T-025)
+- `_draw_final_part()` / `_draw_simulation_part()` — drawing helpers (split from `_draw_single_part`, T-025)
 
 ## PlacedPart
 
@@ -39,5 +44,4 @@ Immutable snapshot of a part after placement. Stores:
 ## Gotchas
 
 - `Shape.nfp_cache` is class-level (shared across all instances) — use `nfp_cache_lock`
-- `Sheet._draw_single_part()` is too long (T-025)
 - The `polygon` vs `original_polygon` distinction is subtle — buffer adds the spacing gap

@@ -1,3 +1,8 @@
+---
+name: nw_freecad_patterns
+description: FreeCAD API patterns — Placement, ViewObject, document groups, thread safety, units. Read before any FreeCAD API work.
+---
+
 # Skill: FreeCAD Patterns
 
 > Read this before working with FreeCAD API (Placement, ViewObject, recompute, document objects).

@@ -1,3 +1,8 @@
+---
+name: nw_nfp_algorithm
+description: NFP/IFP algorithm, two-level cache architecture, GPU/CPU path differences, and hole-scoring correctness. Read before modifying NFP, IFP, or Minkowski computation.
+---
+
 # Skill: NFP / Minkowski Algorithm
 
 > Read this before modifying NFP, IFP, or Minkowski computation.

@@ -1,3 +1,8 @@
+---
+name: nw_todo_format
+description: Task list file formats (TASKS.md, TODO.md, todo_manual.md), prefixes, and rules for writing atomic task entries. Read before writing new task entries.
+---
+
 # Skill: Task List Format
 
 > Read this before writing new task entries for any todo list.

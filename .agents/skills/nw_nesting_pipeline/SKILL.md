@@ -1,3 +1,8 @@
+---
+name: nw_nesting_pipeline
+description: End-to-end nesting pipeline from UI to FreeCAD output — sandbox, masters, GA loop, greedy placement, commit/cancel. Read before modifying any nesting orchestration code.
+---
+
 # Skill: Nesting Pipeline
 
 > Read this before modifying any nesting orchestration code.

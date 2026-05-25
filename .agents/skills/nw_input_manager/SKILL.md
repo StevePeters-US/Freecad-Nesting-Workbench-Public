@@ -1,3 +1,8 @@
+---
+name: nw_input_manager
+description: InputManager event dispatch, input state machine, and action map for the manual nester. Read before modifying input events, keybindings, or action dispatch.
+---
+
 # Skill: Input Manager
 
 > Read this before modifying input handling, event dispatch, or keybindings in the manual nester.

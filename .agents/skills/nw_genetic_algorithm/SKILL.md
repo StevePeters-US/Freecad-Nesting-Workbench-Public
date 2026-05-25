@@ -1,3 +1,8 @@
+---
+name: nw_genetic_algorithm
+description: GA loop architecture, chromosome format, fitness function, and known issues. Read before modifying the GA loop, fitness, crossover, or mutation.
+---
+
 # Skill: Genetic Algorithm
 
 > Read this before modifying the GA loop, fitness function, crossover, or mutation.

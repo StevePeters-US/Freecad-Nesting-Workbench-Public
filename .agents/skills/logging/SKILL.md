@@ -1,6 +1,6 @@
 ---
 name: logging
-description: Guidelines for managing "Verbose" and "Temporary" logs to maintain context window health and user transparency.
+description: Verbose vs. temporary log categories, FreeCAD Console usage, and context window hygiene. Read before adding log statements.
 ---
 
 # Logging Skill

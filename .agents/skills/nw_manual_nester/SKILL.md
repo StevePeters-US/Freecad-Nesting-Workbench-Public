@@ -1,3 +1,8 @@
+---
+name: nw_manual_nester
+description: Manual nester drag/drop tool, physics engine, and collision resolver architecture. Read before modifying the manual nester, physics, or collision resolution.
+---
+
 # Skill: Manual Nester
 
 > Read this before modifying the manual drag/drop tool, physics, or collision resolution.
@@ -49,16 +54,11 @@ ManualNester/
 - Runs synchronously in `handle_move()` — no threads
 - Parts clamped to sheet boundary after displacement
 
-## Known Bugs (see `todo_manual.md` Tier 0)
+## Open Bugs (see `todo_manual.md` Tier 0)
 
 | Bug | Issue |
 |-----|-------|
-| M-B01 | Scroll wheel handler is dead code |
-| M-B02 | Access violation on right-click when idle |
-| M-B03 | `_get_obj_center()` crashes on App::Part |
-| M-B04 | Physics pushes in drag direction (should repulse) |
-| M-B05 | Never calls `separate_overlapping()` |
-| M-B06 | `_get_abs_bbox()` crashes on App::Part |
+| M-B05 | `separate_overlapping()` called with max_iterations=1 only |
 
 ## Gotchas
 
