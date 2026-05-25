@@ -64,8 +64,8 @@ def recursive_delete(doc, obj, protected_names=None):
     try:
         if doc.getObject(obj_name):
             doc.removeObject(obj_name)
-    except Exception:
-        pass  # Already deleted
+    except Exception as e:
+        FreeCAD.Console.PrintWarning(f"[freecad_helpers] Could not remove '{obj_name}': {e}\n")
 
 def get_layout_group(doc):
     """

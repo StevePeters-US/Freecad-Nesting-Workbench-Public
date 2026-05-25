@@ -130,10 +130,6 @@ def _on_part_start(part, viz_manager):
     if master_container:
         viz_manager.highlight_master(master_container)
 
-def _on_part_end(part, placed, viz_manager):
-# ... (rest of function)
-    pass
-
 def _cleanup_highlighting(viz_manager):
 # ... (rest of function)
     if viz_manager:
@@ -170,7 +166,6 @@ def nest(parts, width, height, rotation_steps=1, simulate=False, algorithm='Mink
         kwargs['part_start_callback'] = _main_thread_wrapper(
             lambda p: _on_part_start(p, viz_manager)
         )
-        kwargs['part_end_callback'] = lambda p, pl: _on_part_end(p, pl, viz_manager)
 
     if algorithm == 'Physics':
         nester = physics_nester.PhysicsNester(width, height, rotation_steps, **kwargs)

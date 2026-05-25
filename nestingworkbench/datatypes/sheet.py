@@ -131,8 +131,8 @@ class Sheet:
                 for child in list(sheet_group.Group):
                     try:
                         doc.removeObject(child.Name)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        FreeCAD.Console.PrintWarning(f"[Sheet] Could not remove '{child.Name}': {e}\n")
 
             shapes_group_name = f"Shapes_{self.id+1}"
             
@@ -227,8 +227,8 @@ class Sheet:
                 if boundary_obj:
                     parts_to_place_group.removeObject(boundary_obj)
                 parts_to_place_group.removeObject(shape_obj)
-            except Exception:
-                pass
+            except Exception as e:
+                FreeCAD.Console.PrintWarning(f"[Sheet] Could not unlink '{shape.id}' from parts group: {e}\n")
 
         # Apply the final nesting placement to the CONTAINER.
         container.Placement = final_placement

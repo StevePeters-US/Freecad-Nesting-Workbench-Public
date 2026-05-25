@@ -688,8 +688,8 @@ class NestingController:
             try:
                 self.ui.status_label.setText("Cancelling... Please wait.")
                 self.ui.cancel_button.setEnabled(False) # Prevent double-click
-            except Exception:
-                pass
+            except Exception as e:
+                FreeCAD.Console.PrintWarning(f"[NestingController] UI update on cancel failed: {e}\n")
             
             # If worker is running, also unblock it from any draw wait
             if hasattr(self, '_worker') and self._worker:

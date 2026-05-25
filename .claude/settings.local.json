@@ -2,7 +2,11 @@
   "permissions": {
     "allow": [
       "Bash(find /d/Github/Freecad-Nesting-Workbench -name \"*.py\" -type f -exec wc -l {} +)",
-      "Bash(find /d/Github/Freecad-Nesting-Workbench -type f -name \"*.py\" -exec grep -l \"taskpanel\\\\|task_panel\" {})"
+      "Bash(find /d/Github/Freecad-Nesting-Workbench -type f -name \"*.py\" -exec grep -l \"taskpanel\\\\|task_panel\" {})",
+      "Bash(grep -n \"pass$\" /home/steve/Documents/Github/Freecad-Nesting-Workbench-Private/nestingworkbench/Tools/Nesting/nesting_logic.py)",
+      "Bash(python -m pytest tests/test_base_nester.py tests/test_nesting_strategy.py -v)",
+      "Bash(python -m pytest tests/ -q)",
+      "Bash(python -m pytest tests/ --ignore=tests/test_gpu_nfp.py --ignore=tests/test_nesting_logic.py -q)"
     ]
   }
 }
